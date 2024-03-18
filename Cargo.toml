@@ -1,0 +1,18 @@
+[package]
+name = "futures-concurrency-benchmark"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-executor = "1.8.0"
+futures-concurrency = "7.5.0"
+futures-lite = "2.3.0"
+unsend = "0.2.1"
+
+[dev-dependencies]
+criterion = { version = "0.5.1", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "co"
+harness = false
+

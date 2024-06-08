@@ -10,7 +10,7 @@ futures-lite = "2.3.0"
 unsend = "0.2.1"
 
 [dev-dependencies]
-criterion = "0.5.1"
+criterion = { version = "0.5.1", features = ["async", "async_futures", "csv_output", "html_reports"] }
 
 [profile.bench]
 lto = true

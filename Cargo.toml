@@ -10,7 +10,11 @@ futures-lite = "2.3.0"
 unsend = "0.2.1"
 
 [dev-dependencies]
-criterion = { version = "0.5.1", default-features = false, features = ["cargo_bench_support"] }
+criterion = "0.5.1"
+
+[profile.bench]
+lto = true
+codegen-units = 1
 
 [[bench]]
 name = "co"

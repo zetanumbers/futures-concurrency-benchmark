@@ -58,12 +58,11 @@ fn group(c: &mut Criterion) {
     );
 }
 
-fn local_executor_spawn(c: &mut Criterion) {
-    let ex = async_executor::LocalExecutor::new();
-
-    c.benchmark_group("unsend_spawn")
+fn spawn(c: &mut Criterion) {
+    c.benchmark_group("spawn_local")
         .sample_size(10)
         .bench_function("async_executor::LocalExecutor", |b| {
+            let ex = async_executor::LocalExecutor::new();
             let mut tasks = Vec::with_capacity(JOIN_SIZE);
             b.iter(|| {
                 block_on(ex.run(async {
@@ -74,15 +73,9 @@ fn local_executor_spawn(c: &mut Criterion) {
                     }
                 }));
             })
-        });
-}
-
-fn unsend_executor_spawn(c: &mut Criterion) {
-    let ex = unsend::executor::Executor::new();
-
-    c.benchmark_group("unsend_spawn")
-        .sample_size(10)
+        })
         .bench_function("unsend::executor::Executor", |b| {
+            let ex = unsend::executor::Executor::new();
             let mut tasks = Vec::with_capacity(JOIN_SIZE);
             b.iter(|| {
                 block_on(ex.run(async {
@@ -94,14 +87,10 @@ fn unsend_executor_spawn(c: &mut Criterion) {
                 }));
             })
         });
-}
-
-fn executor_spawn(c: &mut Criterion) {
-    let ex = async_executor::Executor::new();
-
     c.benchmark_group("spawn")
         .sample_size(10)
         .bench_function("async_executor::Executor", |b| {
+            let ex = async_executor::Executor::new();
             let mut tasks = Vec::with_capacity(JOIN_SIZE);
             b.iter(|| {
                 block_on(ex.run(async {
@@ -115,14 +104,6 @@ fn executor_spawn(c: &mut Criterion) {
         });
 }
 
-criterion_group!(
-    benches,
-    seq,
-    join,
-    group,
-    local_executor_spawn,
-    unsend_executor_spawn,
-    executor_spawn,
-);
+criterion_group!(benches, seq, join, group, spawn);
 
 criterion_main!(benches);

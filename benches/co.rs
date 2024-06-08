@@ -5,6 +5,23 @@ use futures_lite::{
     prelude::*,
 };
 
+fn seq(c: &mut Criterion) {
+    c.benchmark_group("seq")
+        .sample_size(10)
+        .bench_function("seq", |b| {
+            let readies = || vec![future::ready(1); 1_000_000];
+
+            b.iter(|| {
+                let mut readies = readies();
+                block_on(async {
+                    for ready in readies.drain(..) {
+                        black_box(ready.await);
+                    }
+                });
+            })
+        });
+}
+
 fn join(c: &mut Criterion) {
     c.benchmark_group("join")
         .sample_size(10)
@@ -81,6 +98,6 @@ fn unsend_executor(c: &mut Criterion) {
         });
 }
 
-criterion_group!(benches, join, group, executor, unsend_executor);
+criterion_group!(benches, seq, join, group, executor, unsend_executor);
 
 criterion_main!(benches);

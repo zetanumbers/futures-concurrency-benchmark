@@ -1,6 +1,6 @@
 use std::future::{ready, Ready};
 
-use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use futures_concurrency::future::{FutureGroup, Join};
 use futures_lite::{future::block_on, StreamExt};
 

@@ -5,13 +5,14 @@ use futures_concurrency::future::{FutureGroup, Join};
 use futures_lite::{future::block_on, StreamExt};
 
 const JOIN_SIZE: usize = 1_000_000;
+const SAMPLE_SIZE: usize = 10;
 fn async_work<T>(x: T) -> Ready<T> {
     ready(x)
 }
 
 fn seq(c: &mut Criterion) {
     c.benchmark_group("seq")
-        .sample_size(10)
+        .sample_size(SAMPLE_SIZE)
         .bench_function("seq", |b| {
             b.iter(|| {
                 block_on(async {
@@ -25,7 +26,7 @@ fn seq(c: &mut Criterion) {
 
 fn join(c: &mut Criterion) {
     c.benchmark_group("join")
-        .sample_size(10)
+        .sample_size(SAMPLE_SIZE)
         .bench_function("futures_concurrency::join", |b| {
             b.iter(|| {
                 block_on(async {
@@ -38,9 +39,9 @@ fn join(c: &mut Criterion) {
 }
 
 fn group(c: &mut Criterion) {
-    c.benchmark_group("group").sample_size(10).bench_function(
-        "futures_concurrency::FutureGroup",
-        |b| {
+    c.benchmark_group("group")
+        .sample_size(SAMPLE_SIZE)
+        .bench_function("futures_concurrency::FutureGroup", |b| {
             let mut group = FutureGroup::with_capacity(JOIN_SIZE);
             b.iter(|| {
                 block_on(async {
@@ -54,13 +55,12 @@ fn group(c: &mut Criterion) {
                     black_box(&mut group);
                 });
             });
-        },
-    );
+        });
 }
 
 fn spawn(c: &mut Criterion) {
     c.benchmark_group("spawn_local")
-        .sample_size(10)
+        .sample_size(SAMPLE_SIZE)
         .bench_function("async_executor::LocalExecutor", |b| {
             let ex = async_executor::LocalExecutor::new();
             let mut tasks = Vec::with_capacity(JOIN_SIZE);
@@ -88,7 +88,7 @@ fn spawn(c: &mut Criterion) {
             })
         });
     c.benchmark_group("spawn")
-        .sample_size(10)
+        .sample_size(SAMPLE_SIZE)
         .bench_function("async_executor::Executor", |b| {
             let ex = async_executor::Executor::new();
             let mut tasks = Vec::with_capacity(JOIN_SIZE);

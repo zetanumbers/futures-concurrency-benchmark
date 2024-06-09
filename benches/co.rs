@@ -13,7 +13,7 @@ criterion_group!(name = benches; config = Criterion::default(); targets = all);
 criterion_main!(benches);
 
 fn all(c: &mut Criterion) {
-    for task_count in [10, 20].map(|p| 2_u64.pow(p)) {
+    for task_count in [20].map(|p| 2_u64.pow(p)) {
         shallow_many(
             c.benchmark_group("ready_task")
                 .throughput(criterion::Throughput::Elements(task_count)),
@@ -65,15 +65,15 @@ async fn yield_hundred_task() -> i32 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TokioParams {
+struct Params {
     tasks: usize,
-    rt: TokioRuntimeFlavor,
+    rt: RuntimeFlavor,
 }
 
-impl fmt::Display for TokioParams {
+impl fmt::Display for Params {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.tasks.fmt(f)?;
-        if let TokioRuntimeFlavor::MultiThread = self.rt {
+        if let RuntimeFlavor::MultiThread = self.rt {
             write!(f, "/{}", num_cpus::get())?
         }
         Ok(())
@@ -81,16 +81,16 @@ impl fmt::Display for TokioParams {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TokioRuntimeFlavor {
+enum RuntimeFlavor {
     CurrentThread,
     MultiThread,
 }
 
-impl TokioRuntimeFlavor {
-    fn builder(&self) -> tokio::runtime::Builder {
+impl RuntimeFlavor {
+    fn tokio_runtime_builder(self) -> tokio::runtime::Builder {
         match self {
-            TokioRuntimeFlavor::CurrentThread => tokio::runtime::Builder::new_current_thread(),
-            TokioRuntimeFlavor::MultiThread => tokio::runtime::Builder::new_multi_thread(),
+            RuntimeFlavor::CurrentThread => tokio::runtime::Builder::new_current_thread(),
+            RuntimeFlavor::MultiThread => tokio::runtime::Builder::new_multi_thread(),
         }
     }
 }
@@ -173,11 +173,8 @@ where
             })
         },
     );
-    for rt in [
-        TokioRuntimeFlavor::CurrentThread,
-        TokioRuntimeFlavor::MultiThread,
-    ] {
-        let param = TokioParams {
+    for rt in [RuntimeFlavor::CurrentThread, RuntimeFlavor::MultiThread] {
+        let param = Params {
             rt,
             tasks: task_count,
         };
@@ -185,7 +182,7 @@ where
             BenchmarkId::new("tokio::task::LocalSet::spawn_local", param),
             &param,
             |b, &param| {
-                let rt = param.rt.builder().build().unwrap();
+                let rt = param.rt.tokio_runtime_builder().build().unwrap();
                 b.to_async(rt).iter(|| async {
                     let local_set = LocalSet::new();
                     let mut tasks = Vec::with_capacity(param.tasks);
@@ -205,7 +202,7 @@ where
             BenchmarkId::new("tokio::task::JoinSet::spawn_local_on", param),
             &param,
             |b, &param| {
-                let rt = param.rt.builder().build().unwrap();
+                let rt = param.rt.tokio_runtime_builder().build().unwrap();
                 b.to_async(rt).iter(|| async {
                     let local_set = LocalSet::new();
                     let mut set = JoinSet::new();
@@ -235,15 +232,19 @@ where
     M: Measurement,
 {
     shallow_many_local(c, work, task_count);
+    let param = Params {
+        rt: RuntimeFlavor::MultiThread,
+        tasks: task_count,
+    };
     c.bench_with_input(
-        BenchmarkId::new("async_executor::Executor", task_count),
-        &task_count,
-        |b, &task_count| {
+        BenchmarkId::new("async_executor::Executor", param),
+        &param,
+        |b, &param| {
             let ex = async_executor::Executor::new();
             b.to_async(FuturesExecutor).iter(|| {
                 ex.run(async {
-                    let mut tasks = Vec::with_capacity(task_count);
-                    tasks.resize_with(task_count, || ex.spawn(work()));
+                    let mut tasks = Vec::with_capacity(param.tasks);
+                    tasks.resize_with(param.tasks, || ex.spawn(work()));
 
                     for task in tasks.drain(..) {
                         black_box(task.await);
@@ -252,11 +253,8 @@ where
             })
         },
     );
-    for rt in [
-        TokioRuntimeFlavor::CurrentThread,
-        TokioRuntimeFlavor::MultiThread,
-    ] {
-        let param = TokioParams {
+    for rt in [RuntimeFlavor::CurrentThread, RuntimeFlavor::MultiThread] {
+        let param = Params {
             rt,
             tasks: task_count,
         };
@@ -264,7 +262,7 @@ where
             BenchmarkId::new("tokio::task::spawn", param),
             &param,
             |b, &param| {
-                let rt = param.rt.builder().build().unwrap();
+                let rt = param.rt.tokio_runtime_builder().build().unwrap();
                 b.to_async(rt).iter(|| async {
                     let mut tasks = Vec::with_capacity(param.tasks);
                     tasks.resize_with(param.tasks, || tokio::task::spawn(work()));
@@ -279,7 +277,7 @@ where
             BenchmarkId::new("tokio::task::JoinSet::spawn", param),
             &param,
             |b, &param| {
-                let rt = param.rt.builder().build().unwrap();
+                let rt = param.rt.tokio_runtime_builder().build().unwrap();
                 b.to_async(rt).iter(|| async {
                     let mut set = iter::repeat_with(work)
                         .take(param.tasks)

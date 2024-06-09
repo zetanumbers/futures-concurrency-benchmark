@@ -65,25 +65,19 @@ async fn yield_hundred_task() -> i32 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Params {
-    tasks: usize,
-    rt: RuntimeFlavor,
-}
-
-impl fmt::Display for Params {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.tasks.fmt(f)?;
-        if let RuntimeFlavor::MultiThread = self.rt {
-            write!(f, "/{}", num_cpus::get())?
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeFlavor {
     CurrentThread,
     MultiThread,
+}
+
+impl fmt::Display for RuntimeFlavor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RuntimeFlavor::CurrentThread => "current-thread",
+            RuntimeFlavor::MultiThread => "multi-thread",
+        }
+        .fmt(f)
+    }
 }
 
 impl RuntimeFlavor {
@@ -175,19 +169,18 @@ where
         },
     );
     for rt in [RuntimeFlavor::CurrentThread, RuntimeFlavor::MultiThread] {
-        let param = Params {
-            rt,
-            tasks: task_count,
-        };
         c.bench_with_input(
-            BenchmarkId::new("tokio::task::LocalSet::spawn_local", param),
-            &param,
-            |b, &param| {
-                let rt = param.rt.tokio_runtime_builder().build().unwrap();
+            BenchmarkId::new(
+                format!("tokio::task::LocalSet::spawn_local/{rt}"),
+                task_count,
+            ),
+            &task_count,
+            |b, &task_count| {
+                let rt = rt.tokio_runtime_builder().build().unwrap();
                 b.to_async(rt).iter(|| async {
                     let local_set = LocalSet::new();
-                    let mut tasks = Vec::with_capacity(param.tasks);
-                    tasks.resize_with(param.tasks, || local_set.spawn_local(work()));
+                    let mut tasks = Vec::with_capacity(task_count);
+                    tasks.resize_with(task_count, || local_set.spawn_local(work()));
 
                     local_set
                         .run_until(async {
@@ -200,14 +193,17 @@ where
             },
         )
         .bench_with_input(
-            BenchmarkId::new("tokio::task::JoinSet::spawn_local_on", param),
-            &param,
-            |b, &param| {
-                let rt = param.rt.tokio_runtime_builder().build().unwrap();
+            BenchmarkId::new(
+                format!("tokio::task::JoinSet::spawn_local_on/{rt}"),
+                task_count,
+            ),
+            &task_count,
+            |b, &task_count| {
+                let rt = rt.tokio_runtime_builder().build().unwrap();
                 b.to_async(rt).iter(|| async {
                     let local_set = LocalSet::new();
                     let mut set = JoinSet::new();
-                    for _ in 0..param.tasks {
+                    for _ in 0..task_count {
                         set.spawn_local_on(work(), &local_set);
                     }
 
@@ -233,19 +229,15 @@ where
     M: Measurement,
 {
     shallow_many_local(c, work, task_count);
-    let param = Params {
-        rt: RuntimeFlavor::MultiThread,
-        tasks: task_count,
-    };
     c.bench_with_input(
-        BenchmarkId::new("async_executor::Executor", param),
-        &param,
-        |b, &param| {
+        BenchmarkId::new("async_executor::Executor", task_count),
+        &task_count,
+        |b, &task_count| {
             let ex = async_executor::Executor::new();
             b.to_async(FuturesExecutor).iter(|| {
                 ex.run(async {
-                    let mut tasks = Vec::with_capacity(param.tasks);
-                    ex.spawn_many(iter::repeat_with(work).take(param.tasks), &mut tasks);
+                    let mut tasks = Vec::with_capacity(task_count);
+                    ex.spawn_many(iter::repeat_with(work).take(task_count), &mut tasks);
 
                     for task in tasks.drain(..) {
                         black_box(task.await);
@@ -255,18 +247,14 @@ where
         },
     );
     for rt in [RuntimeFlavor::CurrentThread, RuntimeFlavor::MultiThread] {
-        let param = Params {
-            rt,
-            tasks: task_count,
-        };
         c.bench_with_input(
-            BenchmarkId::new("tokio::task::spawn", param),
-            &param,
-            |b, &param| {
-                let rt = param.rt.tokio_runtime_builder().build().unwrap();
+            BenchmarkId::new(format!("tokio::task::spawn/{rt}"), task_count),
+            &task_count,
+            |b, &task_count| {
+                let rt = rt.tokio_runtime_builder().build().unwrap();
                 b.to_async(rt).iter(|| async {
-                    let mut tasks = Vec::with_capacity(param.tasks);
-                    tasks.resize_with(param.tasks, || tokio::task::spawn(work()));
+                    let mut tasks = Vec::with_capacity(task_count);
+                    tasks.resize_with(task_count, || tokio::task::spawn(work()));
 
                     for task in tasks.drain(..) {
                         black_box(task.await.unwrap());
@@ -275,13 +263,13 @@ where
             },
         )
         .bench_with_input(
-            BenchmarkId::new("tokio::task::JoinSet::spawn", param),
-            &param,
-            |b, &param| {
-                let rt = param.rt.tokio_runtime_builder().build().unwrap();
+            BenchmarkId::new(format!("tokio::task::JoinSet::spawn/{rt}"), task_count),
+            &task_count,
+            |b, &task_count| {
+                let rt = rt.tokio_runtime_builder().build().unwrap();
                 b.to_async(rt).iter(|| async {
                     let mut set = iter::repeat_with(work)
-                        .take(param.tasks)
+                        .take(task_count)
                         .collect::<JoinSet<_>>();
 
                     while let Some(x) = set.join_next().await {

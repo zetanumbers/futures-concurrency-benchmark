@@ -147,6 +147,7 @@ where
             b.to_async(FuturesExecutor).iter(|| {
                 ex.run(async {
                     let mut tasks = Vec::with_capacity(task_count);
+                    // FIXME: use spawn_many https://github.com/smol-rs/async-executor/pull/120
                     tasks.resize_with(task_count, || ex.spawn(work()));
 
                     for task in tasks.drain(..) {
@@ -244,7 +245,7 @@ where
             b.to_async(FuturesExecutor).iter(|| {
                 ex.run(async {
                     let mut tasks = Vec::with_capacity(param.tasks);
-                    tasks.resize_with(param.tasks, || ex.spawn(work()));
+                    ex.spawn_many(iter::repeat_with(work).take(param.tasks), &mut tasks);
 
                     for task in tasks.drain(..) {
                         black_box(task.await);

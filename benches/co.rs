@@ -8,12 +8,12 @@ use futures_concurrency::future::{FutureGroup, Join};
 use futures_lite::{future::yield_now, StreamExt};
 use tokio::task::{JoinSet, LocalSet};
 
-criterion_group!(name = benches; config = Criterion::default().sample_size(10); targets = all);
+criterion_group!(name = benches; config = Criterion::default(); targets = all);
 
 criterion_main!(benches);
 
 fn all(c: &mut Criterion) {
-    for task_count in [10, 15, 18].map(|p| 2_u64.pow(p)) {
+    for task_count in [10, 20].map(|p| 2_u64.pow(p)) {
         shallow_many(
             c.benchmark_group("ready_task")
                 .throughput(criterion::Throughput::Elements(task_count)),
@@ -21,9 +21,21 @@ fn all(c: &mut Criterion) {
             task_count.try_into().unwrap(),
         );
         shallow_many(
-            c.benchmark_group("yield_now_task")
+            c.benchmark_group("yield_once_task")
                 .throughput(criterion::Throughput::Elements(task_count)),
-            yield_now_task,
+            yield_once_task,
+            task_count.try_into().unwrap(),
+        );
+        shallow_many(
+            c.benchmark_group("yield_ten_task")
+                .throughput(criterion::Throughput::Elements(task_count)),
+            yield_ten_task,
+            task_count.try_into().unwrap(),
+        );
+        shallow_many(
+            c.benchmark_group("yield_hundred_task")
+                .throughput(criterion::Throughput::Elements(task_count)),
+            yield_hundred_task,
             task_count.try_into().unwrap(),
         );
     }
@@ -33,8 +45,22 @@ async fn ready_task() -> i32 {
     1
 }
 
-async fn yield_now_task() -> i32 {
+async fn yield_once_task() -> i32 {
     yield_now().await;
+    1
+}
+
+async fn yield_ten_task() -> i32 {
+    for _ in 0..10 {
+        yield_now().await;
+    }
+    1
+}
+
+async fn yield_hundred_task() -> i32 {
+    for _ in 0..10 {
+        yield_now().await;
+    }
     1
 }
 

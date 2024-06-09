@@ -12,6 +12,7 @@ unsend = "0.2.1"
 
 [dev-dependencies]
 criterion = { version = "0.5.1", features = ["async", "async_futures", "async_tokio", "csv_output", "html_reports"] }
+num_cpus = "1.16.0"
 
 [profile.bench]
 lto = true

@@ -346,6 +346,7 @@ dependencies = [
  "criterion",
  "futures-concurrency",
  "futures-lite 2.3.0",
+ "num_cpus",
  "tokio",
  "unsend",
 ]

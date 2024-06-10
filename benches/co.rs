@@ -1,10 +1,17 @@
-use std::{fmt, future::Future, iter, pin::pin};
+use std::{
+    fmt,
+    future::Future,
+    hash::{DefaultHasher, Hash, Hasher},
+    iter,
+    pin::pin,
+};
 
 use criterion::{
     async_executor::FuturesExecutor, black_box, criterion_group, criterion_main,
-    measurement::Measurement, BenchmarkGroup, BenchmarkId, Criterion,
+    measurement::Measurement, BenchmarkGroup, Criterion,
 };
 use futures_lite::{future::yield_now, StreamExt};
+use rand::{distributions::Uniform, rngs::SmallRng, Rng, SeedableRng};
 use tokio::task::{JoinSet, LocalSet};
 
 criterion_group!(name = benches; config = Criterion::default(); targets = all);
@@ -12,55 +19,79 @@ criterion_group!(name = benches; config = Criterion::default(); targets = all);
 criterion_main!(benches);
 
 fn all(c: &mut Criterion) {
-    for task_count in [20].map(|p| 2_u64.pow(p)) {
-        shallow_many(
-            c.benchmark_group("ready_task")
-                .throughput(criterion::Throughput::Elements(task_count)),
-            ready_task,
-            task_count.try_into().unwrap(),
-        );
-        shallow_many(
-            c.benchmark_group("yield_once_task")
-                .throughput(criterion::Throughput::Elements(task_count)),
-            yield_once_task,
-            task_count.try_into().unwrap(),
-        );
-        shallow_many(
-            c.benchmark_group("yield_ten_task")
-                .throughput(criterion::Throughput::Elements(task_count)),
-            yield_ten_task,
-            task_count.try_into().unwrap(),
-        );
-        shallow_many(
-            c.benchmark_group("yield_hundred_task")
-                .throughput(criterion::Throughput::Elements(task_count)),
-            yield_hundred_task,
-            task_count.try_into().unwrap(),
-        );
-    }
+    const TASK_COUNT: u64 = 2 * 1024 * 1024;
+
+    shallow_many(
+        // TODO: tasks should be bench parameter not a group
+        c.benchmark_group("ready_task")
+            .throughput(criterion::Throughput::Elements(TASK_COUNT)),
+        || {
+            iter::repeat_with(|| async { black_box(1) })
+                .take(black_box(TASK_COUNT.try_into().unwrap()))
+        },
+    );
+    shallow_many(
+        c.benchmark_group("yield_once_task")
+            .throughput(criterion::Throughput::Elements(TASK_COUNT)),
+        || {
+            iter::repeat_with(|| async {
+                yield_now().await;
+                black_box(1)
+            })
+            .take(black_box(TASK_COUNT.try_into().unwrap()))
+        },
+    );
+    shallow_many(
+        c.benchmark_group("yield_ten_task")
+            .throughput(criterion::Throughput::Elements(TASK_COUNT)),
+        || {
+            iter::repeat_with(|| async {
+                for _ in 0..10 {
+                    yield_now().await;
+                }
+                black_box(1)
+            })
+            .take(black_box(TASK_COUNT.try_into().unwrap()))
+        },
+    );
+    shallow_many(
+        c.benchmark_group("yield_hundred_task")
+            .throughput(criterion::Throughput::Elements(TASK_COUNT)),
+        || {
+            iter::repeat_with(|| async {
+                for _ in 0..100 {
+                    yield_now().await;
+                }
+                black_box(1)
+            })
+            .take(black_box(TASK_COUNT.try_into().unwrap()))
+        },
+    );
+    shallow_many(
+        c.benchmark_group("yield_rand_uniform_task")
+            .throughput(criterion::Throughput::Elements(TASK_COUNT)),
+        || {
+            let mut rng = rng_from_pkg_name();
+            iter::repeat_with(move || {
+                let count = black_box(rng.sample(Uniform::new(0, 100)));
+                async move {
+                    for _ in 0..count {
+                        yield_now().await;
+                    }
+                    black_box(1)
+                }
+            })
+            .take(black_box(TASK_COUNT.try_into().unwrap()))
+        },
+    );
 }
 
-async fn ready_task() -> i32 {
-    1
-}
-
-async fn yield_once_task() -> i32 {
-    yield_now().await;
-    1
-}
-
-async fn yield_ten_task() -> i32 {
-    for _ in 0..10 {
-        yield_now().await;
-    }
-    1
-}
-
-async fn yield_hundred_task() -> i32 {
-    for _ in 0..10 {
-        yield_now().await;
-    }
-    1
+fn rng_from_pkg_name() -> SmallRng {
+    let name = env!("CARGO_PKG_NAME");
+    let mut hasher = DefaultHasher::new();
+    name.hash(&mut hasher);
+    let seed = hasher.finish();
+    SmallRng::seed_from_u64(seed)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,239 +119,161 @@ impl RuntimeFlavor {
     }
 }
 
-fn shallow_many_local<F, T, M>(c: &mut BenchmarkGroup<'_, M>, work: F, task_count: usize)
+fn shallow_many_local<F, I, T, M>(c: &mut BenchmarkGroup<'_, M>, work: F)
 where
-    F: Fn() -> T + Copy + 'static,
+    F: Fn() -> I + Copy + 'static,
+    I: Iterator<Item = T>,
     T: Future + 'static,
     M: Measurement,
 {
-    c.bench_with_input(
-        BenchmarkId::new("seq", task_count),
-        &task_count,
-        |b, &task_count| {
-            // TODO: make and try FuturesLiteExecutor
-            b.to_async(FuturesExecutor).iter(|| async {
-                for _ in 0..task_count {
-                    black_box(work().await);
-                }
-            });
-        },
-    )
-    .bench_with_input(
-        BenchmarkId::new("futures_concurrency::join", task_count),
-        &task_count,
-        |b, &task_count| {
-            b.to_async(FuturesExecutor).iter(|| async {
-                let mut futures = Vec::with_capacity(task_count);
-                futures.resize_with(task_count, work);
-                black_box(futures_concurrency::future::Join::join(futures).await);
-            });
-        },
-    )
-    .bench_with_input(
-        BenchmarkId::new("futures_concurrency::FutureGroup", task_count),
-        &task_count,
-        |b, &task_count| {
-            b.to_async(FuturesExecutor).iter(|| async {
-                let mut group = pin!(iter::repeat_with(work)
-                    .take(task_count)
-                    .collect::<futures_concurrency::future::FutureGroup<_>>());
+    c.bench_function("seq", |b| {
+        // TODO: make and try FuturesLiteExecutor
+        b.to_async(FuturesExecutor).iter(|| async {
+            for task in work() {
+                black_box(task.await);
+            }
+        });
+    })
+    .bench_function("futures_concurrency::join", |b| {
+        b.to_async(FuturesExecutor).iter(|| async {
+            black_box(futures_concurrency::future::Join::join(work().collect::<Vec<_>>()).await);
+        });
+    })
+    .bench_function("futures_concurrency::FutureGroup", |b| {
+        b.to_async(FuturesExecutor).iter(|| async {
+            let mut group = pin!(work().collect::<futures_concurrency::future::FutureGroup<_>>());
 
-                while let Some(x) = group.next().await {
-                    black_box(x);
-                }
-            });
-        },
-    )
-    .bench_with_input(
-        BenchmarkId::new("futures_util::future::JoinAll", task_count),
-        &task_count,
-        |b, &task_count| {
-            b.to_async(FuturesExecutor).iter(|| async {
-                black_box(
-                    iter::repeat_with(work)
-                        .take(task_count)
-                        .collect::<futures_util::future::JoinAll<_>>()
-                        .await,
-                );
-            });
-        },
-    )
-    .bench_with_input(
-        BenchmarkId::new("futures_util::stream::FuturesOrdered", task_count),
-        &task_count,
-        |b, &task_count| {
-            b.to_async(FuturesExecutor).iter(|| async {
-                let mut group = pin!(iter::repeat_with(work)
-                    .take(task_count)
-                    .collect::<futures_util::stream::FuturesOrdered<_>>());
+            while let Some(x) = group.next().await {
+                black_box(x);
+            }
+        });
+    })
+    .bench_function("futures_util::future::JoinAll", |b| {
+        b.to_async(FuturesExecutor).iter(|| async {
+            black_box(work().collect::<futures_util::future::JoinAll<_>>().await);
+        });
+    })
+    .bench_function("futures_util::stream::FuturesOrdered", |b| {
+        b.to_async(FuturesExecutor).iter(|| async {
+            let mut group = pin!(work().collect::<futures_util::stream::FuturesOrdered<_>>());
 
-                while let Some(x) = group.next().await {
-                    black_box(x);
-                }
-            });
-        },
-    )
-    .bench_with_input(
-        BenchmarkId::new("futures_util::stream::FuturesUnordered", task_count),
-        &task_count,
-        |b, &task_count| {
-            b.to_async(FuturesExecutor).iter(|| async {
-                let mut group = pin!(iter::repeat_with(work)
-                    .take(task_count)
-                    .collect::<futures_util::stream::FuturesUnordered<_>>());
+            while let Some(x) = group.next().await {
+                black_box(x);
+            }
+        });
+    })
+    .bench_function("futures_util::stream::FuturesUnordered", |b| {
+        b.to_async(FuturesExecutor).iter(|| async {
+            let mut group = pin!(work().collect::<futures_util::stream::FuturesUnordered<_>>());
 
-                while let Some(x) = group.next().await {
-                    black_box(x);
+            while let Some(x) = group.next().await {
+                black_box(x);
+            }
+        });
+    })
+    .bench_function("async_executor::LocalExecutor", |b| {
+        let ex = async_executor::LocalExecutor::new();
+        b.to_async(FuturesExecutor).iter(|| {
+            ex.run(async {
+                // FIXME: use spawn_many https://github.com/smol-rs/async-executor/pull/120
+                let tasks = work().map(|t| ex.spawn(t)).collect::<Vec<_>>();
+                for task in tasks {
+                    black_box(task.await);
                 }
-            });
-        },
-    )
-    .bench_with_input(
-        BenchmarkId::new("async_executor::LocalExecutor", task_count),
-        &task_count,
-        |b, &task_count| {
-            let ex = async_executor::LocalExecutor::new();
-            b.to_async(FuturesExecutor).iter(|| {
-                ex.run(async {
-                    let mut tasks = Vec::with_capacity(task_count);
-                    // FIXME: use spawn_many https://github.com/smol-rs/async-executor/pull/120
-                    tasks.resize_with(task_count, || ex.spawn(work()));
-
-                    for task in tasks.drain(..) {
-                        black_box(task.await);
-                    }
-                })
             })
-        },
-    )
-    .bench_with_input(
-        BenchmarkId::new("unsend::executor::Executor", task_count),
-        &task_count,
-        |b, &task_count| {
-            let ex = unsend::executor::Executor::new();
-            b.to_async(FuturesExecutor).iter(|| {
-                ex.run(async {
-                    let mut tasks = Vec::with_capacity(task_count);
-                    tasks.resize_with(task_count, || ex.spawn(work()));
-
-                    for task in tasks.drain(..) {
-                        black_box(task.await);
-                    }
-                })
+        })
+    })
+    .bench_function("unsend::executor::Executor", |b| {
+        let ex = unsend::executor::Executor::new();
+        b.to_async(FuturesExecutor).iter(|| {
+            ex.run(async {
+                let tasks = work().map(|t| ex.spawn(t)).collect::<Vec<_>>();
+                for task in tasks {
+                    black_box(task.await);
+                }
             })
-        },
-    );
+        })
+    });
     for rt in [RuntimeFlavor::CurrentThread, RuntimeFlavor::MultiThread] {
-        c.bench_with_input(
-            BenchmarkId::new(
-                format!("tokio::task::LocalSet::spawn_local/{rt}"),
-                task_count,
-            ),
-            &task_count,
-            |b, &task_count| {
-                let rt = rt.tokio_runtime_builder().build().unwrap();
-                b.to_async(rt).iter(|| async {
-                    let local_set = LocalSet::new();
-                    let mut tasks = Vec::with_capacity(task_count);
-                    tasks.resize_with(task_count, || local_set.spawn_local(work()));
+        c.bench_function(format!("tokio::task::LocalSet::spawn_local/{rt}"), |b| {
+            let rt = rt.tokio_runtime_builder().build().unwrap();
+            b.to_async(rt).iter(|| async {
+                let local_set = LocalSet::new();
+                let tasks = work().map(|t| local_set.spawn_local(t)).collect::<Vec<_>>();
 
-                    local_set
-                        .run_until(async {
-                            for task in tasks.drain(..) {
-                                black_box(task.await.unwrap());
-                            }
-                        })
-                        .await;
-                })
-            },
-        )
-        .bench_with_input(
-            BenchmarkId::new(
-                format!("tokio::task::JoinSet::spawn_local_on/{rt}"),
-                task_count,
-            ),
-            &task_count,
-            |b, &task_count| {
-                let rt = rt.tokio_runtime_builder().build().unwrap();
-                b.to_async(rt).iter(|| async {
-                    let local_set = LocalSet::new();
-                    let mut set = JoinSet::new();
-                    for _ in 0..task_count {
-                        set.spawn_local_on(work(), &local_set);
-                    }
+                local_set
+                    .run_until(async {
+                        for task in tasks {
+                            black_box(task.await.unwrap());
+                        }
+                    })
+                    .await;
+            })
+        })
+        .bench_function(format!("tokio::task::JoinSet::spawn_local_on/{rt}"), |b| {
+            let rt = rt.tokio_runtime_builder().build().unwrap();
+            b.to_async(rt).iter(|| async {
+                let local_set = LocalSet::new();
+                let mut set = JoinSet::new();
+                for task in work() {
+                    set.spawn_local_on(task, &local_set);
+                }
 
-                    local_set
-                        .run_until(async {
-                            while let Some(x) = set.join_next().await {
-                                black_box(x.unwrap());
-                            }
-                        })
-                        .await;
-                    black_box(&mut set);
-                })
-            },
-        );
+                local_set
+                    .run_until(async {
+                        while let Some(x) = set.join_next().await {
+                            black_box(x.unwrap());
+                        }
+                    })
+                    .await;
+                black_box(&mut set);
+            })
+        });
     }
 }
 
-fn shallow_many<F, T, M>(c: &mut BenchmarkGroup<'_, M>, work: F, task_count: usize)
+fn shallow_many<F, I, T, M>(c: &mut BenchmarkGroup<'_, M>, work: F)
 where
-    F: Fn() -> T + Copy + Send + Sync + 'static,
+    F: Fn() -> I + Copy + Send + Sync + 'static,
+    I: Iterator<Item = T> + Send + Sync,
     T: Future + Send + Sync + 'static,
     T::Output: Send,
     M: Measurement,
 {
-    shallow_many_local(c, work, task_count);
-    c.bench_with_input(
-        BenchmarkId::new("async_executor::Executor", task_count),
-        &task_count,
-        |b, &task_count| {
-            let ex = async_executor::Executor::new();
-            b.to_async(FuturesExecutor).iter(|| {
-                ex.run(async {
-                    let mut tasks = Vec::with_capacity(task_count);
-                    ex.spawn_many(iter::repeat_with(work).take(task_count), &mut tasks);
+    shallow_many_local(c, work);
+    c.bench_function("async_executor::Executor", |b| {
+        let ex = async_executor::Executor::new();
+        b.to_async(FuturesExecutor).iter(|| {
+            ex.run(async {
+                let mut tasks = Vec::new();
+                ex.spawn_many(work(), &mut tasks);
 
-                    for task in tasks.drain(..) {
-                        black_box(task.await);
-                    }
-                })
+                for task in tasks.drain(..) {
+                    black_box(task.await);
+                }
             })
-        },
-    );
+        })
+    });
     for rt in [RuntimeFlavor::CurrentThread, RuntimeFlavor::MultiThread] {
-        c.bench_with_input(
-            BenchmarkId::new(format!("tokio::task::spawn/{rt}"), task_count),
-            &task_count,
-            |b, &task_count| {
-                let rt = rt.tokio_runtime_builder().build().unwrap();
-                b.to_async(rt).iter(|| async {
-                    let mut tasks = Vec::with_capacity(task_count);
-                    tasks.resize_with(task_count, || tokio::task::spawn(work()));
+        c.bench_function(format!("tokio::task::spawn/{rt}"), |b| {
+            let rt = rt.tokio_runtime_builder().build().unwrap();
+            b.to_async(rt).iter(|| async {
+                let tasks = work().map(tokio::task::spawn).collect::<Vec<_>>();
+                for task in tasks {
+                    black_box(task.await.unwrap());
+                }
+            })
+        })
+        .bench_function(format!("tokio::task::JoinSet::spawn/{rt}"), |b| {
+            let rt = rt.tokio_runtime_builder().build().unwrap();
+            b.to_async(rt).iter(|| async {
+                let mut set = work().collect::<JoinSet<_>>();
 
-                    for task in tasks.drain(..) {
-                        black_box(task.await.unwrap());
-                    }
-                })
-            },
-        )
-        .bench_with_input(
-            BenchmarkId::new(format!("tokio::task::JoinSet::spawn/{rt}"), task_count),
-            &task_count,
-            |b, &task_count| {
-                let rt = rt.tokio_runtime_builder().build().unwrap();
-                b.to_async(rt).iter(|| async {
-                    let mut set = iter::repeat_with(work)
-                        .take(task_count)
-                        .collect::<JoinSet<_>>();
-
-                    while let Some(x) = set.join_next().await {
-                        black_box(x.unwrap());
-                    }
-                    black_box(&mut set);
-                })
-            },
-        );
+                while let Some(x) = set.join_next().await {
+                    black_box(x.unwrap());
+                }
+                black_box(&mut set);
+            })
+        });
     }
 }

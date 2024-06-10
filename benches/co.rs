@@ -4,7 +4,6 @@ use criterion::{
     async_executor::FuturesExecutor, black_box, criterion_group, criterion_main,
     measurement::Measurement, BenchmarkGroup, BenchmarkId, Criterion,
 };
-use futures_concurrency::future::{FutureGroup, Join};
 use futures_lite::{future::yield_now, StreamExt};
 use tokio::task::{JoinSet, LocalSet};
 
@@ -99,6 +98,7 @@ where
         BenchmarkId::new("seq", task_count),
         &task_count,
         |b, &task_count| {
+            // TODO: make and try FuturesLiteExecutor
             b.to_async(FuturesExecutor).iter(|| async {
                 for _ in 0..task_count {
                     black_box(work().await);
@@ -113,7 +113,7 @@ where
             b.to_async(FuturesExecutor).iter(|| async {
                 let mut futures = Vec::with_capacity(task_count);
                 futures.resize_with(task_count, work);
-                black_box(Join::join(futures).await);
+                black_box(futures_concurrency::future::Join::join(futures).await);
             });
         },
     )
@@ -124,12 +124,55 @@ where
             b.to_async(FuturesExecutor).iter(|| async {
                 let mut group = pin!(iter::repeat_with(work)
                     .take(task_count)
-                    .collect::<FutureGroup<_>>());
+                    .collect::<futures_concurrency::future::FutureGroup<_>>());
 
                 while let Some(x) = group.next().await {
                     black_box(x);
                 }
-                black_box(&mut group);
+            });
+        },
+    )
+    .bench_with_input(
+        BenchmarkId::new("futures_util::future::JoinAll", task_count),
+        &task_count,
+        |b, &task_count| {
+            b.to_async(FuturesExecutor).iter(|| async {
+                black_box(
+                    iter::repeat_with(work)
+                        .take(task_count)
+                        .collect::<futures_util::future::JoinAll<_>>()
+                        .await,
+                );
+            });
+        },
+    )
+    .bench_with_input(
+        BenchmarkId::new("futures_util::stream::FuturesOrdered", task_count),
+        &task_count,
+        |b, &task_count| {
+            b.to_async(FuturesExecutor).iter(|| async {
+                let mut group = pin!(iter::repeat_with(work)
+                    .take(task_count)
+                    .collect::<futures_util::stream::FuturesOrdered<_>>());
+
+                while let Some(x) = group.next().await {
+                    black_box(x);
+                }
+            });
+        },
+    )
+    .bench_with_input(
+        BenchmarkId::new("futures_util::stream::FuturesUnordered", task_count),
+        &task_count,
+        |b, &task_count| {
+            b.to_async(FuturesExecutor).iter(|| async {
+                let mut group = pin!(iter::repeat_with(work)
+                    .take(task_count)
+                    .collect::<futures_util::stream::FuturesUnordered<_>>());
+
+                while let Some(x) = group.next().await {
+                    black_box(x);
+                }
             });
         },
     )

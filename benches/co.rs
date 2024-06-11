@@ -2,7 +2,7 @@ use std::{
     fmt,
     future::Future,
     hash::{DefaultHasher, Hash, Hasher},
-    iter,
+    iter, mem,
     pin::pin,
 };
 
@@ -19,31 +19,32 @@ criterion_group!(name = benches; config = Criterion::default(); targets = all);
 criterion_main!(benches);
 
 fn all(c: &mut Criterion) {
-    const TASK_COUNT: u64 = 2 * 1024 * 1024;
+    // TODO: must be customizeable per task
+    const TASK_COUNT: usize = 32 * 1024;
+    let throughput = criterion::Throughput::Elements(TASK_COUNT.try_into().unwrap());
 
     shallow_many(
         // TODO: tasks should be bench parameter not a group
         c.benchmark_group("ready_task")
-            .throughput(criterion::Throughput::Elements(TASK_COUNT)),
-        || {
-            iter::repeat_with(|| async { black_box(1) })
-                .take(black_box(TASK_COUNT.try_into().unwrap()))
-        },
+            .throughput(throughput.clone()),
+        || iter::repeat_with(|| async { black_box(1) }).take(black_box(TASK_COUNT)),
+        false,
     );
     shallow_many(
         c.benchmark_group("yield_once_task")
-            .throughput(criterion::Throughput::Elements(TASK_COUNT)),
+            .throughput(throughput.clone()),
         || {
             iter::repeat_with(|| async {
                 yield_now().await;
                 black_box(1)
             })
-            .take(black_box(TASK_COUNT.try_into().unwrap()))
+            .take(black_box(TASK_COUNT))
         },
+        false,
     );
     shallow_many(
         c.benchmark_group("yield_ten_task")
-            .throughput(criterion::Throughput::Elements(TASK_COUNT)),
+            .throughput(throughput.clone()),
         || {
             iter::repeat_with(|| async {
                 for _ in 0..10 {
@@ -51,12 +52,13 @@ fn all(c: &mut Criterion) {
                 }
                 black_box(1)
             })
-            .take(black_box(TASK_COUNT.try_into().unwrap()))
+            .take(black_box(TASK_COUNT))
         },
+        false,
     );
     shallow_many(
         c.benchmark_group("yield_hundred_task")
-            .throughput(criterion::Throughput::Elements(TASK_COUNT)),
+            .throughput(throughput.clone()),
         || {
             iter::repeat_with(|| async {
                 for _ in 0..100 {
@@ -64,12 +66,13 @@ fn all(c: &mut Criterion) {
                 }
                 black_box(1)
             })
-            .take(black_box(TASK_COUNT.try_into().unwrap()))
+            .take(black_box(TASK_COUNT))
         },
+        false,
     );
     shallow_many(
-        c.benchmark_group("yield_rand_uniform_task")
-            .throughput(criterion::Throughput::Elements(TASK_COUNT)),
+        c.benchmark_group("independent_yield_rand_uniform_tasks")
+            .throughput(throughput.clone()),
         || {
             let mut rng = rng_from_pkg_name();
             iter::repeat_with(move || {
@@ -81,9 +84,52 @@ fn all(c: &mut Criterion) {
                     black_box(1)
                 }
             })
-            .take(black_box(TASK_COUNT.try_into().unwrap()))
+            .take(black_box(TASK_COUNT))
         },
+        false,
     );
+    shallow_many(
+        c.benchmark_group("fully_interdependent_tasks")
+            .throughput(throughput.clone()),
+        || fully_interdependent_tasks(TASK_COUNT),
+        true,
+    );
+}
+
+/// Make large amount of interdependent tasks, this is structurally similair to actors
+fn fully_interdependent_tasks(task_count: usize) -> impl Tasks {
+    let mut rng = rng_from_pkg_name();
+    let (mut txs, mut tasks) = iter::repeat_with(|| {
+        let (tx, rx) = flume::bounded(1);
+        (Some(tx), move |tx: flume::Sender<()>| async move {
+            // TODO: async Barrier?
+            rx.recv_async().await.unwrap();
+            tx.try_send(())
+                .or_else(|e| match e {
+                    flume::TrySendError::Full(e) => Err(e),
+                    flume::TrySendError::Disconnected(_) => Ok(()),
+                })
+                .unwrap();
+        })
+    })
+    .take(usize::try_from(task_count).unwrap() + 1)
+    .collect::<(Vec<_>, Vec<_>)>();
+
+    // Create a cycle of channels to cover every task and send a signal from somewhere
+    let cycle = rand::seq::index::sample(&mut rng, task_count + 1, task_count + 1);
+    let mut buf = txs[cycle.index(task_count)].take();
+    for next in cycle {
+        mem::swap(&mut txs[next], &mut buf);
+    }
+    assert!(buf.is_none());
+
+    tasks.pop();
+    txs.pop().flatten().unwrap().send(()).unwrap();
+
+    tasks
+        .into_iter()
+        .zip(txs)
+        .map(|(task, tx)| task(tx.unwrap()))
 }
 
 fn rng_from_pkg_name() -> SmallRng {
@@ -119,29 +165,36 @@ impl RuntimeFlavor {
     }
 }
 
-fn shallow_many_local<F, I, T, M>(c: &mut BenchmarkGroup<'_, M>, work: F)
+fn shallow_many_local<F, M>(c: &mut BenchmarkGroup<'_, M>, work: F, requires_concurrency: bool)
 where
-    F: Fn() -> I + Copy + 'static,
-    I: Iterator<Item = T>,
-    T: Future + 'static,
+    F: LocalTaskGenerator + Copy,
     M: Measurement,
 {
-    c.bench_function("seq", |b| {
-        // TODO: make and try FuturesLiteExecutor
-        b.to_async(FuturesExecutor).iter(|| async {
-            for task in work() {
-                black_box(task.await);
-            }
+    if !requires_concurrency {
+        c.bench_function("seq", |b| {
+            // TODO: make and try FuturesLiteExecutor
+            b.to_async(FuturesExecutor).iter(|| async {
+                for task in work.iter_local_tasks() {
+                    black_box(task.await);
+                }
+            });
         });
-    })
-    .bench_function("futures_concurrency::join", |b| {
+    }
+    c.bench_function("futures_concurrency::join", |b| {
         b.to_async(FuturesExecutor).iter(|| async {
-            black_box(futures_concurrency::future::Join::join(work().collect::<Vec<_>>()).await);
+            black_box(
+                futures_concurrency::future::Join::join(
+                    work.iter_local_tasks().collect::<Vec<_>>(),
+                )
+                .await,
+            );
         });
     })
     .bench_function("futures_concurrency::FutureGroup", |b| {
         b.to_async(FuturesExecutor).iter(|| async {
-            let mut group = pin!(work().collect::<futures_concurrency::future::FutureGroup<_>>());
+            let mut group = pin!(work
+                .iter_local_tasks()
+                .collect::<futures_concurrency::future::FutureGroup<_>>());
 
             while let Some(x) = group.next().await {
                 black_box(x);
@@ -150,12 +203,18 @@ where
     })
     .bench_function("futures_util::future::JoinAll", |b| {
         b.to_async(FuturesExecutor).iter(|| async {
-            black_box(work().collect::<futures_util::future::JoinAll<_>>().await);
+            black_box(
+                work.iter_local_tasks()
+                    .collect::<futures_util::future::JoinAll<_>>()
+                    .await,
+            );
         });
     })
     .bench_function("futures_util::stream::FuturesOrdered", |b| {
         b.to_async(FuturesExecutor).iter(|| async {
-            let mut group = pin!(work().collect::<futures_util::stream::FuturesOrdered<_>>());
+            let mut group = pin!(work
+                .iter_local_tasks()
+                .collect::<futures_util::stream::FuturesOrdered<_>>());
 
             while let Some(x) = group.next().await {
                 black_box(x);
@@ -164,7 +223,9 @@ where
     })
     .bench_function("futures_util::stream::FuturesUnordered", |b| {
         b.to_async(FuturesExecutor).iter(|| async {
-            let mut group = pin!(work().collect::<futures_util::stream::FuturesUnordered<_>>());
+            let mut group = pin!(work
+                .iter_local_tasks()
+                .collect::<futures_util::stream::FuturesUnordered<_>>());
 
             while let Some(x) = group.next().await {
                 black_box(x);
@@ -176,7 +237,10 @@ where
         b.to_async(FuturesExecutor).iter(|| {
             ex.run(async {
                 // FIXME: use spawn_many https://github.com/smol-rs/async-executor/pull/120
-                let tasks = work().map(|t| ex.spawn(t)).collect::<Vec<_>>();
+                let tasks = work
+                    .iter_local_tasks()
+                    .map(|t| ex.spawn(t))
+                    .collect::<Vec<_>>();
                 for task in tasks {
                     black_box(task.await);
                 }
@@ -187,7 +251,10 @@ where
         let ex = unsend::executor::Executor::new();
         b.to_async(FuturesExecutor).iter(|| {
             ex.run(async {
-                let tasks = work().map(|t| ex.spawn(t)).collect::<Vec<_>>();
+                let tasks = work
+                    .iter_local_tasks()
+                    .map(|t| ex.spawn(t))
+                    .collect::<Vec<_>>();
                 for task in tasks {
                     black_box(task.await);
                 }
@@ -199,7 +266,10 @@ where
             let rt = rt.tokio_runtime_builder().build().unwrap();
             b.to_async(rt).iter(|| async {
                 let local_set = LocalSet::new();
-                let tasks = work().map(|t| local_set.spawn_local(t)).collect::<Vec<_>>();
+                let tasks = work
+                    .iter_local_tasks()
+                    .map(|t| local_set.spawn_local(t))
+                    .collect::<Vec<_>>();
 
                 local_set
                     .run_until(async {
@@ -215,7 +285,7 @@ where
             b.to_async(rt).iter(|| async {
                 let local_set = LocalSet::new();
                 let mut set = JoinSet::new();
-                for task in work() {
+                for task in work.iter_local_tasks() {
                     set.spawn_local_on(task, &local_set);
                 }
 
@@ -232,21 +302,18 @@ where
     }
 }
 
-fn shallow_many<F, I, T, M>(c: &mut BenchmarkGroup<'_, M>, work: F)
+fn shallow_many<F, M>(c: &mut BenchmarkGroup<'_, M>, work: F, requires_concurrency: bool)
 where
-    F: Fn() -> I + Copy + Send + Sync + 'static,
-    I: Iterator<Item = T> + Send + Sync,
-    T: Future + Send + Sync + 'static,
-    T::Output: Send,
+    F: TaskGenerator + Copy,
     M: Measurement,
 {
-    shallow_many_local(c, work);
+    shallow_many_local(c, work, requires_concurrency);
     c.bench_function("async_executor::Executor", |b| {
         let ex = async_executor::Executor::new();
         b.to_async(FuturesExecutor).iter(|| {
             ex.run(async {
                 let mut tasks = Vec::new();
-                ex.spawn_many(work(), &mut tasks);
+                ex.spawn_many(work.iter_tasks(), &mut tasks);
 
                 for task in tasks.drain(..) {
                     black_box(task.await);
@@ -258,7 +325,10 @@ where
         c.bench_function(format!("tokio::task::spawn/{rt}"), |b| {
             let rt = rt.tokio_runtime_builder().build().unwrap();
             b.to_async(rt).iter(|| async {
-                let tasks = work().map(tokio::task::spawn).collect::<Vec<_>>();
+                let tasks = work
+                    .iter_tasks()
+                    .map(tokio::task::spawn)
+                    .collect::<Vec<_>>();
                 for task in tasks {
                     black_box(task.await.unwrap());
                 }
@@ -267,7 +337,7 @@ where
         .bench_function(format!("tokio::task::JoinSet::spawn/{rt}"), |b| {
             let rt = rt.tokio_runtime_builder().build().unwrap();
             b.to_async(rt).iter(|| async {
-                let mut set = work().collect::<JoinSet<_>>();
+                let mut set = work.iter_tasks().collect::<JoinSet<_>>();
 
                 while let Some(x) = set.join_next().await {
                     black_box(x.unwrap());
@@ -275,5 +345,131 @@ where
                 black_box(&mut set);
             })
         });
+    }
+}
+
+trait LocalTasks {
+    type LocalTask: Future<Output = Self::LocalOutput> + 'static;
+    type LocalOutput: 'static;
+    fn next_local_task(&mut self) -> Option<Self::LocalTask>;
+
+    #[inline(always)]
+    fn into_iter_local(self) -> LocalTasksIter<Self>
+    where
+        Self: Sized,
+    {
+        LocalTasksIter(self)
+    }
+}
+
+impl<I, T, O> LocalTasks for I
+where
+    I: Iterator<Item = T>,
+    T: Future<Output = O> + 'static,
+    O: 'static,
+{
+    type LocalTask = T;
+    type LocalOutput = O;
+
+    #[inline(always)]
+    fn next_local_task(&mut self) -> Option<Self::LocalTask> {
+        self.next()
+    }
+}
+
+trait Tasks: LocalTasks {
+    type Task: Future<Output = Self::Output> + Send + 'static;
+    type Output: Send + 'static;
+    fn next_task(&mut self) -> Option<Self::Task>;
+
+    #[inline(always)]
+    fn into_iter(self) -> TasksIter<Self>
+    where
+        Self: Sized,
+    {
+        TasksIter(self)
+    }
+}
+
+impl<I, T, O> Tasks for I
+where
+    I: Iterator<Item = T>,
+    T: Future<Output = O> + Send + 'static,
+    O: Send + 'static,
+{
+    type Task = T;
+    type Output = O;
+
+    #[inline(always)]
+    fn next_task(&mut self) -> Option<Self::Task> {
+        self.next()
+    }
+}
+
+trait LocalTaskGenerator {
+    type LocalTasks: LocalTasks;
+    fn generate_local_tasks(&self) -> Self::LocalTasks;
+
+    #[inline(always)]
+    fn iter_local_tasks(&self) -> LocalTasksIter<Self::LocalTasks> {
+        self.generate_local_tasks().into_iter_local()
+    }
+}
+
+impl<F, T> LocalTaskGenerator for F
+where
+    F: Fn() -> T,
+    T: LocalTasks,
+{
+    type LocalTasks = T;
+
+    #[inline(always)]
+    fn generate_local_tasks(&self) -> Self::LocalTasks {
+        self()
+    }
+}
+
+trait TaskGenerator: LocalTaskGenerator {
+    type Tasks: Tasks;
+    fn generate_tasks(&self) -> Self::Tasks;
+
+    #[inline(always)]
+    fn iter_tasks(&self) -> TasksIter<Self::Tasks> {
+        self.generate_tasks().into_iter()
+    }
+}
+
+impl<F, T> TaskGenerator for F
+where
+    F: Fn() -> T,
+    T: Tasks,
+{
+    type Tasks = T;
+
+    #[inline(always)]
+    fn generate_tasks(&self) -> Self::Tasks {
+        self()
+    }
+}
+
+struct LocalTasksIter<T>(T);
+
+impl<T: LocalTasks> Iterator for LocalTasksIter<T> {
+    type Item = T::LocalTask;
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next_local_task()
+    }
+}
+
+struct TasksIter<T>(T);
+
+impl<T: Tasks> Iterator for TasksIter<T> {
+    type Item = T::Task;
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next_task()
     }
 }

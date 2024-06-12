@@ -3,7 +3,9 @@ use std::{
     future::Future,
     hash::{DefaultHasher, Hash, Hasher},
     iter, mem,
-    pin::pin,
+    pin::{pin, Pin},
+    sync::{Arc, Mutex as SyncMutex},
+    task::{self, Poll, Waker},
 };
 
 use criterion::{
@@ -99,37 +101,82 @@ fn all(c: &mut Criterion) {
 /// Make large amount of interdependent tasks, this is structurally similair to actors
 fn fully_interdependent_tasks(task_count: usize) -> impl Tasks {
     let mut rng = rng_from_pkg_name();
-    let (mut txs, mut tasks) = iter::repeat_with(|| {
-        let (tx, rx) = flume::bounded(1);
-        (Some(tx), move |tx: flume::Sender<()>| async move {
-            // TODO: async Barrier?
-            rx.recv_async().await.unwrap();
-            tx.try_send(())
-                .or_else(|e| match e {
-                    flume::TrySendError::Full(e) => Err(e),
-                    flume::TrySendError::Disconnected(_) => Ok(()),
-                })
-                .unwrap();
-        })
+    let (mut left, mut right) = iter::repeat_with(|| {
+        struct Handshake {
+            wakers: [Option<Waker>; 2],
+        }
+
+        impl Handshake {
+            #[allow(clippy::new_ret_no_self)]
+            fn new() -> (HandshakeSide<0>, HandshakeSide<1>) {
+                let shared = Arc::new(SyncMutex::new(Handshake {
+                    wakers: [None, None],
+                }));
+                (
+                    HandshakeSide {
+                        shared: Arc::clone(&shared),
+                    },
+                    HandshakeSide { shared },
+                )
+            }
+
+            fn poll_side(&mut self, cx: &mut task::Context<'_>, side_idx: usize) -> Poll<()> {
+                let new = cx.waker();
+                let current = &mut self.wakers[side_idx];
+                match current {
+                    Some(current) if current.will_wake(new) => (),
+                    _ => *current = Some(new.clone()),
+                }
+
+                let other = self.wakers[1 - side_idx].take();
+
+                if let Some(other) = other {
+                    other.wake();
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            }
+        }
+
+        struct HandshakeSide<const IDX: usize> {
+            shared: Arc<SyncMutex<Handshake>>,
+        }
+
+        impl<const IDX: usize> Future for HandshakeSide<IDX> {
+            type Output = ();
+
+            fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
+                self.shared.lock().unwrap().poll_side(cx, IDX)
+            }
+        }
+
+        let (left, right) = Handshake::new();
+        (Some(left), Some(right))
     })
-    .take(usize::try_from(task_count).unwrap() + 1)
+    .take(task_count)
     .collect::<(Vec<_>, Vec<_>)>();
 
+    // Break handshake cycle
+    left[0] = None;
+    right[0] = None;
+
     // Create a cycle of channels to cover every task and send a signal from somewhere
-    let cycle = rand::seq::index::sample(&mut rng, task_count + 1, task_count + 1);
-    let mut buf = txs[cycle.index(task_count)].take();
+    let cycle = rand::seq::index::sample(&mut rng, task_count, task_count);
+    let mut buf = left[cycle.index(task_count - 1)].take();
     for next in cycle {
-        mem::swap(&mut txs[next], &mut buf);
+        mem::swap(&mut left[next], &mut buf);
     }
     assert!(buf.is_none());
 
-    tasks.pop();
-    txs.pop().flatten().unwrap().send(()).unwrap();
-
-    tasks
-        .into_iter()
-        .zip(txs)
-        .map(|(task, tx)| task(tx.unwrap()))
+    left.into_iter().zip(right).map(|(left, right)| async {
+        if let Some(left) = left {
+            left.await;
+        }
+        if let Some(right) = right {
+            right.await;
+        }
+    })
 }
 
 fn rng_from_pkg_name() -> SmallRng {

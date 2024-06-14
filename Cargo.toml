@@ -16,10 +16,6 @@ criterion = { version = "0.5.1", features = ["async", "async_futures", "async_to
 num_cpus = "1.16.0"
 rand = { version = "0.8.5", default-features = false, features = ["small_rng", "alloc"] }
 
-[profile.bench]
-lto = true
-codegen-units = 1
-
 [[bench]]
 name = "co"
 harness = false

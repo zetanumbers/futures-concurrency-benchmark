@@ -343,6 +343,7 @@ name = "futures-concurrency-benchmark"
 version = "0.1.0"
 dependencies = [
  "async-executor",
+ "atomic-waker",
  "criterion",
  "futures-concurrency",
  "futures-lite 2.3.0",

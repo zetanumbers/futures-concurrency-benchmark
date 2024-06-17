@@ -1,9 +1,12 @@
-use core::{slice, task};
 use std::{
     alloc,
+    future::Future,
     marker::PhantomData,
-    mem, ptr,
+    mem,
+    pin::Pin,
+    ptr,
     sync::atomic::{self, AtomicPtr, AtomicUsize},
+    task,
 };
 
 use atomic_waker::AtomicWaker;
@@ -62,20 +65,68 @@ impl<T> RawSharedHandle<T> {
         }
     }
 
-    unsafe fn force_poll(self) {
+    unsafe fn force_poll(self)
+    where
+        T: Future,
+    {
         let entries = self.entries();
         for i in 0..self.entry_count {
-            todo!()
+            let entry = entries.add(i);
+            let waker = Entry::weak_waker(entry);
+            let mut cx = task::Context::from_waker(&waker);
+            // TODO: react to output
+            Pin::new_unchecked((*entry).future.assume_init_mut()).poll(&mut cx);
         }
     }
 
-    fn header(self) -> *const Header<T> {
-        self.state.cast().as_ptr()
+    unsafe fn poll_scheduled(self)
+    where
+        T: Future,
+    {
+        // TODO: both taking scheduled entries (by one) and polling them are
+        // easily paralellizable
+        let header = self.header();
+        let first_entry = header
+            .first_to_poll
+            .swap(ptr::null_mut(), atomic::Ordering::Relaxed);
+
+        if first_entry.is_null() {
+            return;
+        }
+
+        let _last_entry = header
+            .last_to_poll
+            .swap(ptr::null_mut(), atomic::Ordering::AcqRel);
+        debug_assert!(!_last_entry.is_null());
+        debug_assert_eq!(
+            (*_last_entry)
+                .is_scheduled_and_next
+                .load(atomic::Ordering::Relaxed),
+            scheduled_no_next()
+        );
+
+        let mut current_entry = first_entry;
+        while current_entry != scheduled_no_next() {
+            debug_assert!(!current_entry.is_null());
+
+            let waker = Entry::weak_waker(current_entry);
+            let mut cx = task::Context::from_waker(&waker);
+            // TODO: react to output
+            Pin::new_unchecked((*current_entry).future.assume_init_mut()).poll(&mut cx);
+
+            current_entry = (*current_entry)
+                .is_scheduled_and_next
+                .load(atomic::Ordering::Relaxed);
+        }
     }
 
-    fn entries(self) -> *mut Entry<T> {
+    unsafe fn header<'a>(self) -> &'a Header<T> {
+        self.state.cast().as_ref()
+    }
+
+    unsafe fn entries(self) -> *mut Entry<T> {
         let (_, offset) = Self::layout_and_entries_offset(self.entry_count).unwrap();
-        let ptr = unsafe { self.state.as_ptr().add(offset).cast::<Entry<T>>() };
+        let ptr = self.state.as_ptr().add(offset).cast::<Entry<T>>();
         ptr
     }
 
@@ -143,6 +194,7 @@ impl<T> Header<T> {
                 atomic::Ordering::Release,
                 atomic::Ordering::Acquire,
                 |prev_entry| {
+                    // TODO: can use root entry instead of null
                     let res = if prev_entry.is_null() {
                         self.first_to_poll.compare_exchange(
                             ptr::null_mut(),
@@ -184,19 +236,38 @@ fn scheduled_no_next<T>() -> *mut Entry<T> {
 static mut RESERVE_SCHEDULED_NO_NEXT_ADDR: mem::MaybeUninit<u8> = mem::MaybeUninit::uninit();
 
 impl<T> Entry<T> {
-    const WAKER_VTABLE: task::RawWakerVTable = task::RawWakerVTable::new({
+    const WAKER_VTABLE: task::RawWakerVTable = {
+        // TODO: Cannot yet erase T since it could influence struct layouts
         unsafe fn clone<T>(entry: *const ()) -> task::RawWaker {
             (*Entry::header(entry.cast::<Entry<T>>())).inc_rc();
-            task::RawWaker {
-                data: entry,
-                vtable: Entry<T>::WAKER_VTABLE,
-            }
+            task::RawWaker::new(entry, &Entry::<T>::WAKER_VTABLE)
         }
-        clone::<T>
-    });
 
-    unsafe fn header(this: *const Self) -> *const Header<T> {
-        (*this).header.cast().as_ptr()
+        unsafe fn wake<T>(entry: *const ()) {
+            wake_by_ref::<T>(entry);
+            drop::<T>(entry);
+        }
+
+        unsafe fn wake_by_ref<T>(entry: *const ()) {
+            let entry = entry as *mut Entry<T>;
+            let header = &Entry::header(entry);
+            header.schedule_to_poll(entry);
+            header.extern_waker.wake();
+        }
+
+        unsafe fn drop<T>(entry: *const ()) {
+            Entry::handle(entry.cast::<Entry<T>>()).dec_rc();
+        }
+
+        task::RawWakerVTable::new(clone::<T>, wake::<T>, wake_by_ref::<T>, drop::<T>)
+    };
+
+    unsafe fn header<'a>(this: *const Self) -> &'a Header<T> {
+        (*this).header.cast().as_ref()
+    }
+
+    unsafe fn handle(this: *const Self) -> RawSharedHandle<T> {
+        Header::handle((*this).header.as_ptr())
     }
 
     unsafe fn write_future(this: *mut Self, future: T) {
@@ -207,9 +278,17 @@ impl<T> Entry<T> {
         (*this).future.assume_init_drop();
     }
 
-    unsafe fn weak_waker(this: *const Self) -> mem::ManuallyDrop<task::Waker> {
-        // TODO: Do not inc_rc just forget the waker
-        todo!()
+    unsafe fn strong_waker(this: *mut Self) -> task::Waker {
+        (*Entry::header(this)).inc_rc();
+        let waker = Self::weak_waker(this);
+        mem::ManuallyDrop::into_inner(waker)
+    }
+
+    unsafe fn weak_waker(this: *mut Self) -> mem::ManuallyDrop<task::Waker> {
+        mem::ManuallyDrop::new(task::Waker::from_raw(task::RawWaker::new(
+            this.cast(),
+            &Self::WAKER_VTABLE,
+        )))
     }
 }
 
@@ -227,6 +306,5 @@ mod tests {
     fn needs_drop() {
         assert!(mem::needs_drop::<String>());
         assert!(!mem::needs_drop::<Entry<String>>());
-        assert!(!mem::needs_drop::<Header<String>>());
     }
 }

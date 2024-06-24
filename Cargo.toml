@@ -22,6 +22,3 @@ codegen-units = 1
 name = "co"
 harness = false
 
-[dependencies]
-atomic-waker = "1.1.2"
-

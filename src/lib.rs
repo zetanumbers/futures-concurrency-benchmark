@@ -1,3 +1,5 @@
+// TODO: #![no_std]
+
 use std::{
     cell::UnsafeCell,
     future::Future,
@@ -34,30 +36,55 @@ where
         let header = erased::header(base.as_ptr());
         let entries = unsafe { erased::entries::<F>(base.as_ptr()) };
         unsafe {
-            let end_entry = entries.add(entry_count - 1);
             header.write(JoinHeader {
                 allocation_rc: AtomicUsize::new(1),
                 entry_count,
                 pending_entry_count: entry_count,
-                extern_waker: UnsafeCell::new(mem::MaybeUninit::uninit()),
-                last_to_poll: AtomicPtr::new(erased::erase_entry(end_entry)),
+                extern_waker: mem::MaybeUninit::uninit(),
+                last_to_poll: AtomicPtr::new(ptr::null_mut()),
                 root_entry: EntrySubHeader {
-                    next_scheduled: AtomicPtr::new(erased::erase_entry(entries)),
+                    next_scheduled: AtomicPtr::new(if entry_count != 0 {
+                        erased::erase_entry(entries)
+                    } else {
+                        // TODO: verify
+                        // null pointer are easy to calculate instead of one past end pointer
+                        // in wakers
+                        ptr::null_mut()
+                    }),
+                },
+                buffer_entry: EntrySubHeader {
+                    next_scheduled: AtomicPtr::new(ptr::null_mut()),
                 },
             })
         };
 
-        for (i, future) in v.into_iter().enumerate() {
+        let mut v = v.into_iter();
+        if let Some(future) = v.next_back() {
             unsafe {
-                entries.add(i).write(Entry {
+                entries.add(entry_count - 1).write(Entry {
                     header: EntryHeader {
                         inner: EntrySubHeader {
-                            next_scheduled: AtomicPtr::new(erased::erase_entry(entries.add(i + 1))),
+                            next_scheduled: AtomicPtr::new(ptr::null_mut()),
                         },
                         base,
                     },
                     future: mem::ManuallyDrop::new(future),
                 })
+            }
+            for (i, future) in v.enumerate() {
+                unsafe {
+                    entries.add(i).write(Entry {
+                        header: EntryHeader {
+                            inner: EntrySubHeader {
+                                next_scheduled: AtomicPtr::new(erased::erase_entry(
+                                    entries.add(i + 1),
+                                )),
+                            },
+                            base,
+                        },
+                        future: mem::ManuallyDrop::new(future),
+                    })
+                }
             }
         }
 
@@ -73,8 +100,22 @@ where
     F: Future,
 {
     fn drop(&mut self) {
-        let entry_count = self.len();
+        let header = self.header();
         let entries = self.entries();
+        // SAFETY: header is a valid for this read raw pointer
+        let entry_count = unsafe { (*header).entry_count };
+
+        debug_assert_eq!(
+            // SAFETY: buffer_entry is operated only when `&mut self` is present and isn't
+            // reborrowed
+            unsafe { *(*header).buffer_entry.next_scheduled.get_mut() },
+            ptr::null_mut(),
+        );
+        // SAFETY: header is a valid raw pointer
+        (*header).last_to_poll.store(
+            unsafe { ptr::addr_of_mut!((*header).buffer_entry) },
+            atomic::Ordering::Relaxed,
+        );
 
         // Dropping futures
         for i in 0..entry_count {
@@ -115,6 +156,7 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
         unsafe {
+            let base = self.base.as_ptr();
             let new_waker = cx.waker();
             let header = self.header();
             let entry_count = (*header).entry_count;
@@ -124,53 +166,180 @@ where
             let buffer_entry =
                 erased::erase_entry_header(ptr::addr_of_mut!((*header).buffer_entry));
 
-            // Schedule buffer entry if empty
-            let mut last = (*header).last_to_poll.load(atomic::Ordering::Relaxed);
+            // buffer_entry is synchronized with `&mut self`
+            debug_assert_eq!(
+                *(*header).buffer_entry.next_scheduled.get_mut(),
+                ptr::null_mut()
+            );
 
-            let mut buffer_used = false;
+            let intermediate = schedule_entry::<F>(buffer_entry, base).unwrap();
 
-            if last == root_entry {
-                match (*header).last_to_poll.compare_exchange(
-                    last,
-                    buffer_entry,
-                    // There's no need for synchronization on success
-                    // because `&mut self` is synchronized already.
-                    atomic::Ordering::Relaxed,
-                    atomic::Ordering::Relaxed,
-                ) {
-                    Err(new_last) => {
-                        last = new_last;
-                        // Found another first entry, extern_waker was
-                        // uninitialized by waking but now it's place is
-                        // no longer accessible to anyone except for us.
-                        (*header).extern_waker.write(new_waker.clone());
-                    }
-                    Ok(_) => {
-                        buffer_used = true;
-                        // Pushed buffered entry and acquired ownership
-                        // of the old extern_waker.
-                        let old_waker = (*header).extern_waker.assume_init_mut();
-                        if !old_waker.will_wake(new_waker) {
-                            old_waker.clone_from(new_waker);
-                        }
-                    }
+            // TODO: consider to not "stuff" if anything is already scheduled
+            // We have "stuffed" the buffer entry to dissallow wakers to access the extern_waker.
+
+            if intermediate == root_entry {
+                let extern_waker = (*header).extern_waker.assume_init_mut();
+                if !extern_waker.will_wake(new_waker) {
+                    extern_waker.clone_from(new_waker);
                 }
+            } else {
+                (*header).extern_waker.write(new_waker.clone());
             }
+            // Release extern_waker
+            atomic::fence(atomic::Ordering::Release);
 
-            // Root entry is accessable exclusivelly by us
-            let first = mem::replace((*header).root_entry.next_scheduled.get_mut(), end_entry);
-            (*header)
-                .last_to_poll
-                .swap(root_entry, atomic::Ordering::AcqRel);
+            // Any waker that accesses root will schedule its future in the next batch.
+            let first = (*header)
+                .root_entry
+                .next_scheduled
+                .swap(ptr::null_mut(), atomic::Ordering::Relaxed);
 
-            // Remove the buffer entry
-            if buffer_used {
-                first
+            schedule_entry::<F>(root_entry, base);
+
+            todo!("remove the buffer entry");
+
+            let mut current = first;
+            while current != end_entry {
+                let current_entry = erased::entry::<F>(current);
+
+                let waker = weak_waker::<F>(current);
+                let mut cx = task::Context::from_waker(&waker);
+                // TODO: Do no ignore the output:
+                if Pin::new_unchecked(&mut *(*current_entry).future)
+                    .poll(&mut cx)
+                    .is_ready()
+                {
+                    (*header).pending_entry_count -= 1;
+                }
+
+                let next = (*current_entry)
+                    .header
+                    .inner
+                    .next_scheduled
+                    .swap(ptr::null_mut(), atomic::Ordering::Relaxed);
+                current = next;
             }
 
             todo!()
         }
     }
+}
+
+// TODO: consider erasing type param
+/// Weak waker itself does not increment allocation reference counter, but it's clone would.
+unsafe fn weak_waker<F>(current: *mut erased::Entry) -> mem::ManuallyDrop<task::Waker>
+where
+    F: Future,
+{
+    unsafe fn clone<T>(entry: *const ()) -> task::RawWaker {
+        inc_rc((*erased::entry_header(entry as _)).base.as_ptr());
+        task::RawWaker::new(entry, const { &vtable::<T>() })
+    }
+
+    unsafe fn wake<T>(entry: *const ()) {
+        wake_by_ref::<T>(entry);
+        drop_waker::<T>(entry);
+    }
+
+    unsafe fn wake_by_ref<T>(entry: *const ()) {
+        let entry = entry as _;
+        let entry_header = erased::entry_header(entry);
+
+        let base = (*entry_header).base.as_ptr();
+        let header = erased::header(base);
+
+        let Some(last) = schedule_entry::<T>(entry, base) else {
+            return;
+        };
+
+        let root = erased::erase_entry_header(ptr::addr_of_mut!((*header).root_entry));
+        if last == root {
+            // Scheduled first, so we are in our right to wake the external waker
+            atomic::fence(atomic::Ordering::Acquire);
+            (*header).extern_waker.assume_init_read().wake()
+        }
+    }
+
+    unsafe fn drop_waker<T>(entry: *const ()) {
+        dec_rc::<T>((*erased::entry_header(entry as _)).base.as_ptr());
+    }
+
+    const fn vtable<F>() -> task::RawWakerVTable {
+        task::RawWakerVTable::new(clone::<F>, wake::<F>, wake_by_ref::<F>, drop_waker::<F>)
+    }
+
+    let raw = task::RawWaker::new(current.cast::<()>(), const { &vtable::<F>() });
+    mem::ManuallyDrop::new(task::Waker::from_raw(raw))
+}
+
+unsafe fn schedule_entry<T>(
+    entry: *mut erased::Entry,
+    base: *mut erased::JoinImpl,
+) -> Option<*mut erased::Entry> {
+    let header = erased::header(base);
+    let entries = erased::entries::<T>(base);
+    let entry_count = (*header).entry_count;
+    // TODO: consider using a different sentinel value
+    let end_entry = erased::erase_entry(entries.add(entry_count));
+
+    if (*erased::entry_subheader(entry))
+        .next_scheduled
+        .compare_exchange(
+            ptr::null_mut(),
+            end_entry,
+            atomic::Ordering::Relaxed,
+            atomic::Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        // Current future is already scheduled
+        return None;
+    }
+
+    let mut last;
+    'reload_last: loop {
+        // "Acquire" the last.next_scheduled writes
+        last = (*header).last_to_poll.load(atomic::Ordering::Acquire);
+        while let Err(new_last) = (*erased::entry_subheader(last))
+            .next_scheduled
+            .compare_exchange_weak(
+                end_entry,
+                entry,
+                atomic::Ordering::Relaxed,
+                atomic::Ordering::Relaxed,
+            )
+        {
+            if !new_last.is_null() {
+                // We are racing against join's poll. We ensured our future is not scheduled
+                // and then marked it as such, but not yet scheduled it. But join's poll
+                // already got to current "last" scheduled future, so no way to schedule in
+                // this batch. We need to reload last pointer and try the next batch.
+                continue 'reload_last;
+            }
+            last = new_last;
+        }
+        break 'reload_last;
+    }
+
+    while (*header)
+        .last_to_poll
+        .compare_exchange_weak(
+            last,
+            entry,
+            // "Release" the last.next_scheduled and entry.next_scheduled entry writes
+            atomic::Ordering::Release,
+            atomic::Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        // Someone who scheduled some previous entry is currently "releases"
+        // memory effects, they will eventually exchange last_to_poll
+        // pointer to one we expect.
+        // TODO: consider std::thread::yield_now
+        std::hint::spin_loop()
+    }
+
+    Some(last)
 }
 
 struct JoinHeader {
@@ -189,13 +358,15 @@ struct EntrySubHeader {
 }
 
 /// Used in wakers
-#[repr(C)] // We assume casting erased::Entry pointer to EntryHeader pointer is valid to access entry header
+// We assume casting erased::Entry pointer to EntrySubHeader pointer is valid to access entry header
+#[repr(C)]
 struct EntryHeader {
     inner: EntrySubHeader,
     base: ptr::NonNull<erased::JoinImpl>,
 }
 
-#[repr(C)] // We assume casting erased::Entry pointer to EntryHeader pointer is valid to access entry header
+// We assume casting erased::Entry pointer to EntryHeader pointer is valid to access entry header
+#[repr(C)]
 struct Entry<T> {
     header: EntryHeader,
     future: mem::ManuallyDrop<T>,
@@ -239,7 +410,15 @@ mod erased {
         _pinned: PhantomPinned,
     }
 
-    pub const fn header_entry(entry: *mut Entry) -> *mut super::EntrySubHeader {
+    pub const fn entry_subheader(entry: *mut Entry) -> *mut super::EntrySubHeader {
+        entry.cast()
+    }
+
+    pub const fn entry_header(entry: *mut Entry) -> *mut super::EntryHeader {
+        entry.cast()
+    }
+
+    pub const fn entry<T>(entry: *mut Entry) -> *mut super::Entry<T> {
         entry.cast()
     }
 

@@ -227,7 +227,16 @@ where
             });
         });
     }
-    c.bench_function("futures_concurrency::join", |b| {
+    c.bench_function("futures_concurrency_benchmark::Join", |b| {
+        b.to_async(FuturesExecutor).iter(|| async {
+            let mut join = pin!(futures_concurrency_benchmark::Join::from_vec(
+                work.iter_local_tasks().collect::<Vec<_>>(),
+            ));
+            join.as_mut().await;
+            black_box(join);
+        });
+    })
+    .bench_function("futures_concurrency::join", |b| {
         b.to_async(FuturesExecutor).iter(|| async {
             black_box(
                 futures_concurrency::future::Join::join(

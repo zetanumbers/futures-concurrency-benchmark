@@ -85,7 +85,7 @@ where
                         for j in 0..i {
                             mem::ManuallyDrop::drop(&mut (*entries.add(j)).future);
                         }
-                        dec_rc::<F>(base.as_ptr());
+                        erased::dealloc_join_impl::<F>(base.as_ptr(), entry_count)
                     }
                     panic!("input iterator had faulty `len` method implementation, such that it didn't provide specified number of values")
                 };

@@ -1,6 +1,9 @@
-// TODO: #![no_std]
+#![no_std]
+#![deny(clippy::std_instead_of_core, clippy::alloc_instead_of_core)]
 
-use std::{
+extern crate alloc;
+
+use core::{
     future::Future,
     marker::PhantomData,
     mem,
@@ -25,8 +28,6 @@ where
 
 unsafe impl<F> Send for Join<F> where F: Future + Send {}
 unsafe impl<F> Sync for Join<F> where F: Future + Sync {}
-
-// TODO: impl Sync, Send for Join
 
 // TODO: use `F: IntoFuture`
 // TODO: FromIterator
@@ -187,7 +188,6 @@ where
     F: Future,
 {
     // TODO: Output should be something that satisfies `IntoIterator<Item = F::Output>`
-    // TODO: Collect output within the entry in place of the finished future
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
@@ -386,7 +386,7 @@ unsafe fn schedule_entry<T: Future>(
         // memory effects, they will eventually exchange last_to_poll
         // pointer to one we expect.
         // TODO: consider std::thread::yield_now
-        std::hint::spin_loop()
+        core::hint::spin_loop()
     }
 
     Some(last)
@@ -447,12 +447,8 @@ unsafe fn dec_rc<T: Future>(base: *mut erased::JoinImpl) {
 }
 
 mod erased {
-    use std::{
-        alloc::{self, alloc, dealloc},
-        future::Future,
-        marker::PhantomPinned,
-        mem, ptr,
-    };
+    use alloc::alloc::{alloc, dealloc, handle_alloc_error};
+    use core::{alloc::Layout, future::Future, marker::PhantomPinned, mem, ptr};
 
     pub struct JoinImpl {
         _data: u8,
@@ -498,7 +494,7 @@ mod erased {
         let layout = join_impl_layout::<T>(entry_count);
         // SAFETY: size is always non zero because of header data
         let Some(base) = ptr::NonNull::new(unsafe { alloc(layout) }) else {
-            alloc::handle_alloc_error(layout)
+            handle_alloc_error(layout)
         };
         base.cast()
     }
@@ -508,11 +504,11 @@ mod erased {
         unsafe { dealloc(base.cast(), layout) }
     }
 
-    pub const fn join_impl_layout<T: Future>(entry_count: usize) -> alloc::Layout {
+    pub const fn join_impl_layout<T: Future>(entry_count: usize) -> Layout {
         let entries_size = entry_count * mem::size_of::<super::Entry<T>>();
 
         unsafe {
-            alloc::Layout::from_size_align_unchecked(
+            Layout::from_size_align_unchecked(
                 const { entries_offset::<T>() } + entries_size,
                 const {
                     max(

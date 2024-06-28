@@ -5,6 +5,7 @@ extern crate alloc;
 
 use core::{
     future::Future,
+    hint,
     marker::PhantomData,
     mem,
     pin::Pin,
@@ -29,6 +30,12 @@ where
 unsafe impl<F> Send for Join<F> where F: Future + Send {}
 unsafe impl<F> Sync for Join<F> where F: Future + Sync {}
 
+static mut RESERVE_END_ENTRY_ADDR: mem::MaybeUninit<u8> = mem::MaybeUninit::uninit();
+#[inline(always)]
+fn end_entry() -> *mut erased::Entry {
+    unsafe { ptr::addr_of_mut!(RESERVE_END_ENTRY_ADDR).cast() }
+}
+
 // TODO: use `F: IntoFuture`
 // TODO: FromIterator
 impl<F> Join<F>
@@ -40,6 +47,9 @@ where
         I: IntoIterator<Item = F>,
         I::IntoIter: ExactSizeIterator,
     {
+        // TODO: Does this affect performance?
+        // Convince the compiler to reserve a unique address
+        hint::black_box(end_entry());
         let mut iter = iter.into_iter();
         let entry_count = iter.len();
         let base = erased::alloc_join_impl::<F>(entry_count);
@@ -53,7 +63,7 @@ where
                 .checked_sub(1)
                 .map_or(root_entry, |i| erased::erase_entry(entries.add(i)))
         };
-        let end_entry = erased::erase_entry(unsafe { entries.add(entry_count) });
+        let end_entry = end_entry();
         unsafe {
             header.write(JoinHeader {
                 allocation_rc: AtomicUsize::new(1),
@@ -107,8 +117,6 @@ where
                 for i in 0..entry_count - 1 {
                     init_entry_next(i, erased::erase_entry(entries.add(i + 1)));
                 }
-                // This is not neccessary and can be simplified, but perhaps it is better for future
-                // compatibility if we use sentinel pointer instead of end_entry
                 init_entry_next(entry_count - 1, end_entry);
 
                 assert!(iter.next().is_none(), "input iterator had faulty `len` method implementation, such that iterator provided too many values");
@@ -141,7 +149,7 @@ where
                 ptr::null_mut(),
             );
             let buffer_entry = erased::erase_entry_subheader(buffer_entry);
-            schedule_entry::<F>(buffer_entry, self.base.as_ptr());
+            schedule_entry(buffer_entry, self.base.as_ptr());
 
             // Dropping futures
             for i in 0..entry_count {
@@ -149,6 +157,9 @@ where
             }
 
             dec_rc::<F>(self.base.as_ptr());
+            // TODO: Does this affect performance?
+            // Convince the compiler to reserve a unique address
+            hint::black_box(end_entry());
         }
     }
 }
@@ -205,7 +216,7 @@ where
                 ptr::null_mut()
             );
 
-            let intermediate = schedule_entry::<F>(buffer_entry, base).unwrap();
+            let intermediate = schedule_entry(buffer_entry, base).unwrap();
 
             // TODO: consider to not "stuff" if anything is already scheduled
             // We have "stuffed" the buffer entry to dissallow wakers to access the extern_waker.
@@ -227,7 +238,7 @@ where
                 .next_scheduled
                 .swap(ptr::null_mut(), atomic::Ordering::Relaxed);
 
-            schedule_entry::<F>(root_entry, base);
+            schedule_entry(root_entry, base);
 
             // Root entry is now at the top, no need to update last_to_poll
             let next_intermediate = (*erased::entry_subheader(buffer_entry))
@@ -275,7 +286,7 @@ where
     }
 }
 
-// TODO: consider erasing type param
+// TODO: consider erasing type param to reduce code size
 /// Weak waker itself does not increment allocation reference counter, but it's clone would.
 unsafe fn weak_waker<F>(current: *mut erased::Entry) -> mem::ManuallyDrop<task::Waker>
 where
@@ -287,18 +298,21 @@ where
     }
 
     unsafe fn wake<T: Future>(entry: *const ()) {
-        wake_by_ref::<T>(entry);
+        wake_by_ref(entry);
         drop_waker::<T>(entry);
     }
 
-    unsafe fn wake_by_ref<T: Future>(entry: *const ()) {
+    // TODO: consider the possiblity that adding future's generic type might help with performance
+    // because there would be many monomorphized copies of this function performing only on their
+    // designated type, thus, perhaps, helping the branch predictor.
+    unsafe fn wake_by_ref(entry: *const ()) {
         let entry = entry as _;
         let entry_header = erased::entry_header(entry);
 
         let base = (*entry_header).base.as_ptr();
         let header = erased::header(base);
 
-        let Some(last) = schedule_entry::<T>(entry, base) else {
+        let Some(last) = schedule_entry(entry, base) else {
             return;
         };
 
@@ -315,22 +329,19 @@ where
     }
 
     const fn vtable<F: Future>() -> task::RawWakerVTable {
-        task::RawWakerVTable::new(clone::<F>, wake::<F>, wake_by_ref::<F>, drop_waker::<F>)
+        task::RawWakerVTable::new(clone::<F>, wake::<F>, wake_by_ref, drop_waker::<F>)
     }
 
     let raw = task::RawWaker::new(current.cast::<()>(), const { &vtable::<F>() });
     mem::ManuallyDrop::new(task::Waker::from_raw(raw))
 }
 
-unsafe fn schedule_entry<T: Future>(
+unsafe fn schedule_entry(
     entry: *mut erased::Entry,
     base: *mut erased::JoinImpl,
 ) -> Option<*mut erased::Entry> {
     let header = erased::header(base);
-    let entries = erased::entries::<T>(base);
-    let entry_count = (*header).entry_count;
-    // TODO: consider using a different sentinel value
-    let end_entry = erased::erase_entry(entries.add(entry_count));
+    let end_entry = end_entry();
 
     if (*erased::entry_subheader(entry))
         .next_scheduled
@@ -386,6 +397,7 @@ unsafe fn schedule_entry<T: Future>(
         // memory effects, they will eventually exchange last_to_poll
         // pointer to one we expect.
         // TODO: consider std::thread::yield_now
+        // TODO: consider crossbeam::utils::Backoff
         core::hint::spin_loop()
     }
 
@@ -412,9 +424,11 @@ struct EntrySubHeader {
 #[repr(C)]
 struct EntryHeader {
     inner: EntrySubHeader,
+    // TODO: This pointer can be made relative and reduced in size
     base: ptr::NonNull<erased::JoinImpl>,
 }
 
+// TODO: allow user to access this type through slice from JoinOutput, but be carefull with moves
 // We assume casting erased::Entry pointer to EntryHeader pointer is valid to access entry header
 #[repr(C)]
 struct Entry<T>

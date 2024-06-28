@@ -34,8 +34,13 @@ impl<F> Join<F>
 where
     F: Future,
 {
-    pub fn from_vec(v: Vec<F>) -> Self {
-        let entry_count = v.len();
+    pub fn from_iterable<I>(iter: I) -> Self
+    where
+        I: IntoIterator<Item = F>,
+        I::IntoIter: ExactSizeIterator,
+    {
+        let mut iter = iter.into_iter();
+        let entry_count = iter.len();
         let base = erased::alloc_join_impl::<F>(entry_count);
 
         let header = erased::header(base.as_ptr());
@@ -73,33 +78,39 @@ where
             })
         };
 
-        let mut v = v.into_iter();
-        if let Some(future) = v.next_back() {
-            unsafe {
-                entries.add(entry_count - 1).write(Entry {
-                    header: EntryHeader {
-                        inner: EntrySubHeader {
-                            next_scheduled: AtomicPtr::new(end_entry),
-                        },
-                        base,
-                    },
-                    future: mem::ManuallyDrop::new(FusedFuture::new(future)),
-                })
-            }
-            for (i, future) in v.enumerate() {
+        if entry_count > 0 {
+            let mut init_entry_next = |i, next_scheduled| {
+                let Some(future) = iter.next() else {
+                    unsafe {
+                        for j in 0..i {
+                            mem::ManuallyDrop::drop(&mut (*entries.add(j)).future);
+                        }
+                        dec_rc::<F>(base.as_ptr());
+                    }
+                    panic!("input iterator had faulty `len` method implementation, such that it didn't provide specified number of values")
+                };
                 unsafe {
                     entries.add(i).write(Entry {
                         header: EntryHeader {
                             inner: EntrySubHeader {
-                                next_scheduled: AtomicPtr::new(erased::erase_entry(
-                                    entries.add(i + 1),
-                                )),
+                                next_scheduled: AtomicPtr::new(next_scheduled),
                             },
                             base,
                         },
                         future: mem::ManuallyDrop::new(FusedFuture::new(future)),
                     })
                 }
+            };
+
+            unsafe {
+                for i in 0..entry_count - 1 {
+                    init_entry_next(i, erased::erase_entry(entries.add(i + 1)));
+                }
+                // This is not neccessary and can be simplified, but perhaps it is better for future
+                // compatibility if we use sentinel pointer instead of end_entry
+                init_entry_next(entry_count - 1, end_entry);
+
+                assert!(iter.next().is_none(), "input iterator had faulty `len` method implementation, such that iterator provided too many values");
             }
         }
 

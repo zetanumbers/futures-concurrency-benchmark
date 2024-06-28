@@ -229,7 +229,7 @@ where
     }
     c.bench_function("alt_join::Join", |b| {
         b.to_async(FuturesExecutor).iter(|| async {
-            let mut join = pin!(alt_join::Join::from_vec(
+            let mut join = pin!(alt_join::Join::from_iterable(
                 work.iter_local_tasks().collect::<Vec<_>>(),
             ));
             join.as_mut().await;

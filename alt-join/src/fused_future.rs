@@ -4,6 +4,7 @@ use std::{
     task::{self, Poll},
 };
 
+#[derive(Debug)]
 pub enum FusedFuture<F>
 where
     F: Future,
@@ -31,6 +32,13 @@ where
             FusedFuture::Pending(_) => Poll::Pending,
         }
     }
+
+    pub fn is_ready(&self) -> bool {
+        match self {
+            FusedFuture::Pending(_) => false,
+            FusedFuture::Ready(_) => true,
+        }
+    }
 }
 
 impl<F> Future for FusedFuture<F>
@@ -40,14 +48,12 @@ where
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
-        let out = unsafe {
-            match self.as_mut().get_unchecked_mut() {
-                FusedFuture::Pending(f) => task::ready!(Pin::new_unchecked(f).poll(cx)),
-                FusedFuture::Ready(_) => return Poll::Ready(()),
+        unsafe {
+            if let FusedFuture::Pending(f) = self.as_mut().get_unchecked_mut() {
+                let out = task::ready!(Pin::new_unchecked(f).poll(cx));
+                self.set(FusedFuture::Ready(out));
             }
-        };
-
-        self.set(FusedFuture::Ready(out));
+        }
         Poll::Ready(())
     }
 }

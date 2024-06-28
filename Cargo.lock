@@ -27,6 +27,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "alt-join"
+version = "0.1.0"
+dependencies = [
+ "futures-lite 2.3.0",
+ "noop-waker",
+]
+
+[[package]]
 name = "anes"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -342,6 +350,7 @@ dependencies = [
 name = "futures-concurrency-benchmark"
 version = "0.1.0"
 dependencies = [
+ "alt-join",
  "async-executor",
  "criterion",
  "futures-concurrency",
@@ -525,6 +534,12 @@ checksum = "87dfd01fe195c66b572b37921ad8803d010623c0aca821bea2302239d155cdae"
 dependencies = [
  "adler",
 ]
+
+[[package]]
+name = "noop-waker"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "56902c3f29ce7afbecc1d088dfd2e3108033f3c02041c70788ed94280a3d5261"
 
 [[package]]
 name = "num-traits"

@@ -227,9 +227,9 @@ where
             });
         });
     }
-    c.bench_function("futures_concurrency_benchmark::Join", |b| {
+    c.bench_function("alt_join::Join", |b| {
         b.to_async(FuturesExecutor).iter(|| async {
-            let mut join = pin!(futures_concurrency_benchmark::Join::from_vec(
+            let mut join = pin!(alt_join::Join::from_vec(
                 work.iter_local_tasks().collect::<Vec<_>>(),
             ));
             join.as_mut().await;

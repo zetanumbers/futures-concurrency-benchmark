@@ -1,0 +1,11 @@
+[package]
+name = "alt-join"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+noop-waker = "0.1.0"
+
+[dev-dependencies]
+futures-lite = { version = "2.3.0", default-features = false }
+noop-waker = "0.1.0"

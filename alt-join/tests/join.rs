@@ -35,3 +35,23 @@ fn yield_now() {
         hint::black_box(join);
     }
 }
+
+#[cfg(loom)]
+#[test]
+fn loom_yield_now() {
+    let f = || {
+        let waker = noop_waker();
+        let mut cx = task::Context::from_waker(&waker);
+
+        for i in 1..=3 {
+            let mut join = pin!(alt_join::Join::from_iterable(
+                (0..i).map(|_| future::yield_now()),
+            ));
+            assert_eq!(join.as_mut().poll(&mut cx), task::Poll::Pending);
+            assert_eq!(join.as_mut().poll(&mut cx), task::Poll::Ready(()));
+            hint::black_box(join);
+        }
+    };
+
+    loom::model(f)
+}

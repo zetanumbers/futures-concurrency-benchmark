@@ -6,6 +6,9 @@ edition = "2021"
 [dependencies]
 noop-waker = "0.1.0"
 
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
+
 [dev-dependencies]
 futures-lite = { version = "2.3.0", default-features = false }
 noop-waker = "0.1.0"

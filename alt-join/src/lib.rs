@@ -36,6 +36,7 @@ fn end_entry() -> *mut erased::Entry {
 
 // TODO: use `F: IntoFuture`
 // TODO: FromIterator
+// TODO: consider atomic consume ordering
 impl<F> Join<F>
 where
     F: Future,

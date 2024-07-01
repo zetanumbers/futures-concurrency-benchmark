@@ -6,10 +6,10 @@ extern crate alloc;
 
 use core::{future::Future, hint, marker::PhantomData, mem, pin::Pin, ptr, task};
 
-#[cfg(not(loom))]
+#[cfg(not(alt_join_loom))]
 use core::sync::atomic::{self, AtomicPtr, AtomicUsize};
 
-#[cfg(loom)]
+#[cfg(alt_join_loom)]
 use loom::sync::atomic::{self, AtomicPtr, AtomicUsize};
 
 use fused_future::FusedFuture;
@@ -209,13 +209,13 @@ where
                 erased::erase_entry_subheader(ptr::addr_of_mut!((*header).buffer_entry));
 
             // buffer_entry is synchronized with `&mut self`
-            #[cfg(not(loom))]
+            #[cfg(not(alt_join_loom))]
             debug_assert_eq!(
                 *(*header).buffer_entry.next_scheduled.get_mut(),
                 ptr::null_mut()
             );
 
-            #[cfg(loom)]
+            #[cfg(alt_join_loom)]
             debug_assert_eq!(
                 (*header)
                     .buffer_entry

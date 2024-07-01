@@ -38,7 +38,7 @@ fn yield_now() {
     }
 }
 
-#[cfg(loom)]
+#[cfg(alt_join_loom)]
 #[test]
 fn loom_yield_now() {
     let f = || {

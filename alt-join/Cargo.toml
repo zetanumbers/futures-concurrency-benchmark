@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 noop-waker = "0.1.0"
 
-[target.'cfg(loom)'.dependencies]
+[target.'cfg(alt_join_loom)'.dependencies]
 loom = "0.7"
 
 [dev-dependencies]

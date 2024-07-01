@@ -1,3 +1,5 @@
+#![allow(unexpected_cfgs)]
+
 use std::{future::Future, hint, pin::pin, task};
 
 use noop_waker::noop_waker;

@@ -1,4 +1,5 @@
 #![no_std]
+#![allow(unexpected_cfgs)]
 #![deny(clippy::std_instead_of_core, clippy::alloc_instead_of_core)]
 
 extern crate alloc;

@@ -38,7 +38,6 @@ fn end_entry() -> *mut erased::Entry {
 
 // TODO: use `F: IntoFuture`
 // TODO: FromIterator
-// TODO: Fences aren't supported by the ThreadSanitizer
 impl<F> Join<F>
 where
     F: Future,
@@ -222,7 +221,7 @@ where
                 ptr::null_mut()
             );
 
-            if (*header).pending_entry_count == 0 {
+            if (*header).pending_entry_count == 0 && (*header).entry_count != 0 {
                 panic!("Polled the already completed `Join`")
             }
 

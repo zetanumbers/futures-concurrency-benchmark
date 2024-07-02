@@ -1,5 +1,7 @@
 #![allow(unexpected_cfgs)]
 
+// TODO: Steal some tests
+
 use std::{future::Future, hint, pin::pin, task};
 
 use noop_waker::noop_waker;
@@ -38,6 +40,7 @@ fn yield_now() {
     }
 }
 
+// TODO: isolate into a separate file
 #[cfg(alt_join_loom)]
 #[test]
 fn loom_yield_now() {

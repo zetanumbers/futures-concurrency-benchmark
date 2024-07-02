@@ -39,6 +39,7 @@ fn end_entry() -> *mut erased::Entry {
 // TODO: use `F: IntoFuture`
 // TODO: FromIterator
 // TODO: consider atomic consume ordering
+// TODO: Fences aren't supported by the ThreadSanitizer
 impl<F> Join<F>
 where
     F: Future,
@@ -226,6 +227,10 @@ where
                     .load(atomic::Ordering::Relaxed),
                 ptr::null_mut()
             );
+
+            if (*header).pending_entry_count == 0 {
+                panic!("Polled the already completed `Join`")
+            }
 
             let intermediate = schedule_entry(buffer_entry, base).unwrap();
 

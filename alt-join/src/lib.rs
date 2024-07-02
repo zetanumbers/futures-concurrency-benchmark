@@ -17,6 +17,8 @@ use noop_waker::noop_waker;
 
 mod fused_future;
 
+const MAX_REFCOUNT: usize = isize::MAX as usize;
+
 pub struct Join<F>
 where
     F: Future,
@@ -449,11 +451,38 @@ where
 }
 
 unsafe fn inc_rc(base: *mut erased::JoinImpl) {
-    unsafe {
+    // FIXME?: Commented out formally sound code, which replaces practically sound code
+    let old_alloc_rc = unsafe {
         (*erased::header(base))
             .allocation_rc
-            .fetch_add(1, atomic::Ordering::Acquire);
+            .fetch_add(1, atomic::Ordering::Relaxed)
+        // (*erased::header(base))
+        //     .allocation_rc
+        //     .load(atomic::Ordering::Relaxed)
+    };
+    if old_alloc_rc > MAX_REFCOUNT {
+        // https://github.com/rust-lang/rust/issues/67952
+        struct ForceAbort;
+        impl Drop for ForceAbort {
+            fn drop(&mut self) {
+                panic!("Aborting");
+            }
+        }
+        let _abort = ForceAbort;
+        panic!("Too many wakers, as some wakers got leaked");
     }
+    // while (*erased::header(base))
+    //     .allocation_rc
+    //     .compare_exchange_weak(
+    //         old_alloc_rc,
+    //         old_alloc_rc + 1,
+    //         atomic::Ordering::Relaxed,
+    //         atomic::Ordering::Relaxed,
+    //     )
+    //     .is_err()
+    // {
+    //     hint::spin_loop()
+    // }
 }
 
 unsafe fn dec_rc<T: Future>(base: *mut erased::JoinImpl) {

@@ -502,13 +502,15 @@ mod erased {
     use alloc::alloc::{alloc, dealloc, handle_alloc_error};
     use core::{alloc::Layout, future::Future, marker::PhantomPinned, mem, ptr};
 
+    #[repr(transparent)]
     pub struct JoinImpl {
-        _data: u8,
+        _header: super::JoinHeader,
         _pinned: PhantomPinned,
     }
 
+    #[repr(transparent)]
     pub struct Entry {
-        _data: u8,
+        _header: super::EntryHeader,
         _pinned: PhantomPinned,
     }
 
@@ -539,7 +541,7 @@ mod erased {
 
     #[inline]
     pub const unsafe fn entries<T: Future>(base: *mut JoinImpl) -> *mut super::Entry<T> {
-        base.add(entries_offset::<T>()).cast()
+        base.byte_add(entries_offset::<T>()).cast()
     }
 
     pub fn alloc_join_impl<T: Future>(entry_count: usize) -> ptr::NonNull<JoinImpl> {

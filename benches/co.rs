@@ -22,7 +22,7 @@ criterion_main!(benches);
 
 fn all(c: &mut Criterion) {
     // TODO: must be customizeable per task
-    const TASK_COUNT: usize = 32 * 1024;
+    const TASK_COUNT: usize = 128 * 1024;
     let throughput = criterion::Throughput::Elements(TASK_COUNT.try_into().unwrap());
 
     shallow_many(

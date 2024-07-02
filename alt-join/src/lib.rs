@@ -143,15 +143,9 @@ where
             let entry_count = (*header).entry_count;
 
             let buffer_entry = ptr::addr_of_mut!((*header).buffer_entry);
-            debug_assert_eq!(
-                // buffer_entry is operated only when `&mut self` is present and isn't reborrowed
-                (*buffer_entry)
-                    .next_scheduled
-                    .load(atomic::Ordering::Relaxed),
-                ptr::null_mut(),
-            );
             let buffer_entry = erased::erase_entry_subheader(buffer_entry);
-            schedule_entry(buffer_entry, self.base.as_ptr());
+            schedule_entry(buffer_entry, self.base.as_ptr())
+                .unwrap_or_else(|| unreachable!("failed to schedule the buffer_entry"));
 
             // Dropping futures
             for i in 0..entry_count {
@@ -254,7 +248,8 @@ where
                 .next_scheduled
                 .swap(ptr::null_mut(), atomic::Ordering::Relaxed);
 
-            schedule_entry(root_entry, base);
+            schedule_entry(root_entry, base)
+                .unwrap_or_else(|| unreachable!("failed to schedule the root_entry back"));
 
             // Root entry is now at the top, no need to update last_to_poll
             let next_intermediate = (*erased::entry_subheader(buffer_entry))
@@ -352,6 +347,7 @@ where
     mem::ManuallyDrop::new(task::Waker::from_raw(raw))
 }
 
+#[must_use = "code should handle failure to schedule an entry"]
 unsafe fn schedule_entry(
     entry: *mut erased::Entry,
     base: *mut erased::JoinImpl,

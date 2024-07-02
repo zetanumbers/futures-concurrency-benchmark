@@ -91,6 +91,7 @@ fn all(c: &mut Criterion) {
         false,
     );
     shallow_many(
+        // TODO: Add partially interdependent tasks benchmark
         c.benchmark_group("fully_interdependent_tasks")
             .throughput(throughput.clone()),
         || fully_interdependent_tasks(TASK_COUNT),

@@ -38,7 +38,6 @@ fn end_entry() -> *mut erased::Entry {
 
 // TODO: use `F: IntoFuture`
 // TODO: FromIterator
-// TODO: consider atomic consume ordering
 // TODO: Fences aren't supported by the ThreadSanitizer
 impl<F> Join<F>
 where
@@ -197,6 +196,7 @@ where
     // TODO: Output should be something that satisfies `IntoIterator<Item = F::Output>`
     type Output = ();
 
+    // TODO: Maybe not execute entire batch of awakened futures and suspend sometimes?
     fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
         unsafe {
             let base = self.base.as_ptr();
@@ -234,13 +234,14 @@ where
             if intermediate == root_entry {
                 let extern_waker = (*header).extern_waker.assume_init_mut();
                 if !extern_waker.will_wake(new_waker) {
+                    // SAFETY: We don't need a fence there because since we are already synchronized
+                    // with it, even tho schedule_entry only gives the release ordering.
                     extern_waker.clone_from(new_waker);
                 }
             } else {
                 (*header).extern_waker.write(new_waker.clone());
             }
-            // Release extern_waker
-            atomic::fence(atomic::Ordering::Release);
+            // SAFETY: We don't need a fence there because schedule_entry gives the release ordering.
 
             // Any waker that accesses root will schedule its future in the next batch.
             let mut first = (*header)
@@ -330,7 +331,7 @@ where
         let root = erased::erase_entry_subheader(ptr::addr_of_mut!((*header).root_entry));
         if last == root {
             // Scheduled first, so we are in our right to wake the external waker
-            atomic::fence(atomic::Ordering::Acquire);
+            // SAFETY: no need for acquire fence since schedule_entry gives us the acquire ordering
             (*header).extern_waker.assume_init_read().wake()
         }
     }
@@ -347,6 +348,11 @@ where
     mem::ManuallyDrop::new(task::Waker::from_raw(raw))
 }
 
+/// Schedule an entry to the join impl
+///
+/// # Memory ordering
+///
+/// If returned `Some(_)` acquire and release ordering is established on the `last_to_poll`.
 #[must_use = "code should handle failure to schedule an entry"]
 unsafe fn schedule_entry(
     entry: *mut erased::Entry,
@@ -371,6 +377,7 @@ unsafe fn schedule_entry(
 
     let mut last;
     'reload_last: loop {
+        // TODO: try consume ordering
         // "Acquire" the last.next_scheduled writes
         last = (*header).last_to_poll.load(atomic::Ordering::Acquire);
         while let Err(new_last) = (*erased::entry_subheader(last))
@@ -494,7 +501,7 @@ unsafe fn dec_rc<T: Future>(base: *mut erased::JoinImpl) {
             .fetch_sub(1, atomic::Ordering::Release)
     };
     if old_alloc_rc == 1 {
-        atomic::fence(atomic::Ordering::Acquire);
+        // No need for fence since entry_count field and allocation are already synchronized
         unsafe { erased::dealloc_join_impl::<T>(base, (*header).entry_count) }
     }
 }

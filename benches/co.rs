@@ -21,15 +21,16 @@ criterion_group!(name = benches; config = Criterion::default(); targets = all);
 criterion_main!(benches);
 
 fn all(c: &mut Criterion) {
-    // TODO: must be customizeable per task
-    const TASK_COUNT: usize = 128 * 1024;
-    let throughput = criterion::Throughput::Elements(TASK_COUNT.try_into().unwrap());
+    // TODO: this number of tasks only gives 12% cache misses while 1_000_000 gives ~60% cache
+    // misses, benchmark should cover this.
+    let task_count: usize = std::env::var("TASK_COUNT").map_or(128 * 1024, |s| s.parse().unwrap());
+    let throughput = criterion::Throughput::Elements(task_count.try_into().unwrap());
 
     shallow_many(
         // TODO: tasks should be bench parameter not a group
         c.benchmark_group("ready_task")
             .throughput(throughput.clone()),
-        || iter::repeat_with(|| async { black_box(1) }).take(black_box(TASK_COUNT)),
+        || iter::repeat_with(|| async { black_box(1) }).take(task_count),
         false,
     );
     shallow_many(
@@ -40,7 +41,7 @@ fn all(c: &mut Criterion) {
                 yield_now().await;
                 black_box(1)
             })
-            .take(black_box(TASK_COUNT))
+            .take(task_count)
         },
         false,
     );
@@ -54,7 +55,7 @@ fn all(c: &mut Criterion) {
                 }
                 black_box(1)
             })
-            .take(black_box(TASK_COUNT))
+            .take(task_count)
         },
         false,
     );
@@ -68,7 +69,7 @@ fn all(c: &mut Criterion) {
                 }
                 black_box(1)
             })
-            .take(black_box(TASK_COUNT))
+            .take(task_count)
         },
         false,
     );
@@ -86,7 +87,7 @@ fn all(c: &mut Criterion) {
                     black_box(1)
                 }
             })
-            .take(black_box(TASK_COUNT))
+            .take(task_count)
         },
         false,
     );
@@ -94,7 +95,7 @@ fn all(c: &mut Criterion) {
         // TODO: Add partially interdependent tasks benchmark
         c.benchmark_group("fully_interdependent_tasks")
             .throughput(throughput.clone()),
-        || fully_interdependent_tasks(TASK_COUNT),
+        || fully_interdependent_tasks(task_count),
         true,
     );
 }

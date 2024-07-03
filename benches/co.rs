@@ -22,7 +22,7 @@ criterion_main!(benches);
 
 fn all(c: &mut Criterion) {
     // TODO: must be customizeable per task
-    const TASK_COUNT: usize = 32 * 1024;
+    const TASK_COUNT: usize = 128 * 1024;
     let throughput = criterion::Throughput::Elements(TASK_COUNT.try_into().unwrap());
 
     shallow_many(
@@ -91,6 +91,7 @@ fn all(c: &mut Criterion) {
         false,
     );
     shallow_many(
+        // TODO: Add partially interdependent tasks benchmark
         c.benchmark_group("fully_interdependent_tasks")
             .throughput(throughput.clone()),
         || fully_interdependent_tasks(TASK_COUNT),
@@ -227,7 +228,16 @@ where
             });
         });
     }
-    c.bench_function("futures_concurrency::join", |b| {
+    c.bench_function("alt_join::Join", |b| {
+        b.to_async(FuturesExecutor).iter(|| async {
+            let mut join = pin!(alt_join::Join::from_iterable(
+                work.iter_local_tasks().collect::<Vec<_>>(),
+            ));
+            join.as_mut().await;
+            black_box(join);
+        });
+    })
+    .bench_function("futures_concurrency::join", |b| {
         b.to_async(FuturesExecutor).iter(|| async {
             black_box(
                 futures_concurrency::future::Join::join(

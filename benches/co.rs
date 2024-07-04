@@ -3,9 +3,7 @@ use std::{
     future::Future,
     hash::{DefaultHasher, Hash, Hasher},
     iter, mem,
-    pin::{pin, Pin},
-    sync::{Arc, Mutex as SyncMutex},
-    task::{self, Poll, Waker},
+    pin::pin,
 };
 
 use criterion::{
@@ -104,56 +102,7 @@ fn all(c: &mut Criterion) {
 fn fully_interdependent_tasks(task_count: usize) -> impl Tasks {
     let mut rng = rng_from_pkg_name();
     let (mut left, mut right) = iter::repeat_with(|| {
-        struct Handshake {
-            wakers: [Option<Waker>; 2],
-        }
-
-        impl Handshake {
-            #[allow(clippy::new_ret_no_self)]
-            fn new() -> (HandshakeSide<0>, HandshakeSide<1>) {
-                let shared = Arc::new(SyncMutex::new(Handshake {
-                    wakers: [None, None],
-                }));
-                (
-                    HandshakeSide {
-                        shared: Arc::clone(&shared),
-                    },
-                    HandshakeSide { shared },
-                )
-            }
-
-            fn poll_side(&mut self, cx: &mut task::Context<'_>, side_idx: usize) -> Poll<()> {
-                let new = cx.waker();
-                let current = &mut self.wakers[side_idx];
-                match current {
-                    Some(current) if current.will_wake(new) => (),
-                    _ => *current = Some(new.clone()),
-                }
-
-                let other = self.wakers[1 - side_idx].take();
-
-                if let Some(other) = other {
-                    other.wake();
-                    Poll::Ready(())
-                } else {
-                    Poll::Pending
-                }
-            }
-        }
-
-        struct HandshakeSide<const IDX: usize> {
-            shared: Arc<SyncMutex<Handshake>>,
-        }
-
-        impl<const IDX: usize> Future for HandshakeSide<IDX> {
-            type Output = ();
-
-            fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
-                self.shared.lock().unwrap().poll_side(cx, IDX)
-            }
-        }
-
-        let (left, right) = Handshake::new();
+        let [left, right] = futures_concurrency_benchmark::handshake();
         (Some(left), Some(right))
     })
     .take(task_count)

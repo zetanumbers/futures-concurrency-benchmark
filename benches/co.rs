@@ -21,7 +21,7 @@ criterion_main!(benches);
 fn all(c: &mut Criterion) {
     // TODO: this number of tasks only gives 12% cache misses while 1_000_000 gives ~60% cache
     // misses, benchmark should cover this.
-    let task_count: usize = std::env::var("TASK_COUNT").map_or(128 * 1024, |s| s.parse().unwrap());
+    let task_count: usize = std::env::var("TASK_COUNT").map_or(100_000, |s| s.parse().unwrap());
     let throughput = criterion::Throughput::Elements(task_count.try_into().unwrap());
 
     shallow_many(
@@ -90,16 +90,51 @@ fn all(c: &mut Criterion) {
         false,
     );
     shallow_many(
-        // TODO: Add partially interdependent tasks benchmark
         c.benchmark_group("fully_interdependent_tasks")
             .throughput(throughput.clone()),
-        || fully_interdependent_tasks(task_count),
+        || interdependent_tasks(task_count, task_count),
+        true,
+    );
+    shallow_many(
+        c.benchmark_group("sqrt_interdependent_tasks")
+            .throughput(throughput.clone()),
+        || interdependent_tasks(task_count, (task_count as f64).sqrt() as usize),
+        true,
+    );
+    shallow_many(
+        c.benchmark_group("100000_interdependent_tasks")
+            .throughput(throughput.clone()),
+        || interdependent_tasks(task_count, 100000),
+        true,
+    );
+    shallow_many(
+        c.benchmark_group("10000_interdependent_tasks")
+            .throughput(throughput.clone()),
+        || interdependent_tasks(task_count, 10000),
+        true,
+    );
+    shallow_many(
+        c.benchmark_group("1000_interdependent_tasks")
+            .throughput(throughput.clone()),
+        || interdependent_tasks(task_count, 1000),
+        true,
+    );
+    shallow_many(
+        c.benchmark_group("100_interdependent_tasks")
+            .throughput(throughput.clone()),
+        || interdependent_tasks(task_count, 100),
+        true,
+    );
+    shallow_many(
+        c.benchmark_group("10_interdependent_tasks")
+            .throughput(throughput.clone()),
+        || interdependent_tasks(task_count, 10),
         true,
     );
 }
 
 /// Make large amount of interdependent tasks, this is structurally similair to actors
-fn fully_interdependent_tasks(task_count: usize) -> impl Tasks {
+fn interdependent_tasks(task_count: usize, batch_count: usize) -> impl Tasks {
     let mut rng = rng_from_pkg_name();
     let (mut left, mut right) = iter::repeat_with(|| {
         let [left, right] = futures_concurrency_benchmark::handshake();
@@ -109,8 +144,10 @@ fn fully_interdependent_tasks(task_count: usize) -> impl Tasks {
     .collect::<(Vec<_>, Vec<_>)>();
 
     // Break handshake cycle
-    left[0] = None;
-    right[0] = None;
+    for i in (0..task_count).step_by(batch_count) {
+        left[i] = None;
+        right[i] = None;
+    }
 
     // Create a cycle of channels to cover every task and send a signal from somewhere
     let cycle = rand::seq::index::sample(&mut rng, task_count, task_count);
